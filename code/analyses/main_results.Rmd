@@ -1,0 +1,1924 @@
+---
+title: "Analyses for main text"
+output:
+  html_document:
+    code_download: true
+    code_folding: hide
+    toc: true
+    toc_float:
+      collapsed: true
+---
+
+# Setup
+
+```{r libraries}
+library(tidyverse)
+library(here)
+
+library(glmmTMB)
+library(broom.mixed)
+
+library(tidygraph)
+library(ggraph)
+
+library(kableExtra)
+library(tictoc)
+```
+
+```{r custom-functions}
+source(here("code", "utils", "ggplot_themes.R"))
+source(here("code", "utils", "modeling_utils.R"))
+source(here("code", "utils", "representation_utils.R"))
+source(here("code", "utils", "unicode_greek.R"))
+
+predict_glmmTMB <- function(make_predictions_for, model_object) {
+  make_predictions_for %>%
+    bind_cols(
+      predict(
+        object = model_object,
+        newdata = .,
+        re.form = NA, allow.new.levels = TRUE, se.fit = TRUE, type = "response"
+      )
+    )
+}
+
+check_significance <- function(tidy_df) {
+  tidy_df %>%
+    mutate(
+      sig = case_when(
+        p.value < 0.001 ~ "***",
+        p.value < 0.01 ~ "**",
+        p.value < 0.05 ~ "*",
+        p.value < 0.1 ~ ".",
+        TRUE ~ ""
+      )
+    )
+}
+```
+
+```{r knitting-setup}
+# To control when to save figures
+knitting <- knitr::is_html_output()
+
+if (knitting) {
+  if (!dir.exists(here("figures"))) {
+    dir.create(here("figures"))
+  }
+}
+```
+
+
+# Network visualizations
+
+```{r load-network-data}
+adjlist <- here("data", "clean-data", "adjlist_learned.csv") %>%
+  read_csv(show_col_types = FALSE)
+
+g <- adjlist %>%
+  filter(from < to, edge == 1) %>%
+  select(-edge) %>%
+  tbl_graph(edges = ., directed = FALSE)
+
+adjlist_reevaluated <- here("data", "clean-data", "adjlist_reevaluated.csv") %>%
+  read_csv(show_col_types = FALSE)
+
+g_reevaluated <- adjlist_reevaluated %>%
+  filter(from < to, edge == 1) %>%
+  select(-edge) %>%
+  tbl_graph(edges = ., directed = FALSE)
+```
+
+```{r plot-networks}
+plot_network_learned <- g %>%
+  mutate(name = row_number()) %>%
+  ggraph("stress") +
+  theme_network() +
+  geom_edge_link() +
+  geom_node_label(aes(label = name))
+
+plot_network_reevaluated <- g_reevaluated %>%
+  mutate(name = row_number()) %>%
+  ggraph("stress") +
+  theme_network() +
+  geom_edge_link() +
+  geom_node_label(aes(label = name))
+
+plot_network_learned
+plot_network_reevaluated
+
+if (knitting) {
+  ggsave(
+    here("figures", str_c("network_learned", ".pdf")),
+    plot = plot_network_learned,
+    width = 4, height = 2,
+    units = "in", dpi = 300
+  )
+  
+  ggsave(
+    here("figures", str_c("network_reevaluated", ".pdf")),
+    plot = plot_network_reevaluated,
+    width = 4, height = 2,
+    units = "in", dpi = 300
+  )
+}
+```
+
+
+# Can humans solve social navigation problems?
+
+In the paper, we start by examining social navigation behaviors in a one-day session (Study 1), or in the first session of a two-day study (Studies 2-3). Across all three studies, the procedure is exactly identical; studies 2-3 are, in this part of the dataset, exact replications of study 1.
+
+```{r load-navigation-data}
+nav_study1 <- here("data", "clean-data", "study1_message_passing.csv") %>%
+  read_csv(show_col_types = FALSE) %>%
+  filter(
+    two_correct_options == FALSE,
+    shortest_path_given_opts == shortest_path_given_start_end
+  ) %>%
+  mutate(
+    study = "Study 1",
+    measurement_id = str_c("D", measurement_id),
+    shortest_path = factor(shortest_path_given_opts)
+  ) %>%
+  select(
+    study, sub_id, measurement_id, shortest_path,
+    startpoint_id, endpoint_id,
+    opt1_id, opt2_id,
+    correct_choice, sub_choice,
+    correct, rt
+  )
+
+nav_study2 <- here("data", "clean-data", "study2_message_passing.csv") %>%
+  read_csv(show_col_types = FALSE) %>%
+  filter(
+    two_correct_options == FALSE,
+    shortest_path_given_opts == shortest_path_given_start_end
+  ) %>%
+  mutate(
+    study = "Study 2",
+    measurement_id = case_when(
+      network == "learned" ~ str_c("D", measurement_id),
+      network == "reevaluated" ~ "D2b"
+    ),
+    shortest_path = factor(shortest_path_given_opts)
+  ) %>%
+  select(
+    study, sub_id, measurement_id, shortest_path,
+    startpoint_id, endpoint_id,
+    opt1_id, opt2_id,
+    correct_choice, sub_choice,
+    correct, rt
+  )
+
+nav_study3 <- here("data", "clean-data", "study3_message_passing.csv") %>%
+  read_csv(show_col_types = FALSE) %>%
+  filter(
+    two_correct_options == FALSE,
+    shortest_path_given_opts == shortest_path_given_start_end
+  ) %>%
+  mutate(
+    study = "Study 3",
+    measurement_id = case_when(
+      network == "reevaluated" ~ "D2b",
+      measurement_id == 1 ~ "D1",
+      measurement_id == 2 ~ "D1b",
+      measurement_id == 3 ~ "D2"
+    ),
+    shortest_path = factor(shortest_path_given_opts)
+  ) %>%
+  select(
+    study, sub_id, measurement_id, shortest_path,
+    startpoint_id, endpoint_id,
+    opt1_id, opt2_id,
+    correct_choice, sub_choice,
+    correct, rt
+  )
+```
+
+We'll start off with some descriptive statistics of human behavior. To maximize statistical power, we will pool across studies whenever possible.
+
+```{r descriptive-navigation-day1}
+bind_rows(nav_study1, nav_study2, nav_study3) %>%
+  filter(measurement_id == "D1") %>%
+  group_by(measurement_id, shortest_path) %>%
+  summarise(accuracy = mean(correct), .groups = "drop") %>%
+  arrange(measurement_id, shortest_path) %>%
+  pivot_wider(
+    names_from = shortest_path, values_from = accuracy, names_prefix = "dist-"
+  ) %>%
+  kbl(
+    caption = str_c(
+      "<center>", "Descriptive: Navigation accuracy", "</center>"
+    ),
+    digits = 2
+  ) %>%
+  kable_styling(bootstrap_options = c("responsive"))
+```
+
+And now the inferential statistical tests. Note that we're interested in knowing whether navigation accuracy differs from chance at each distance, so we'll estimate the same statistical model multiple times, changing the reference category each time. Note that this only reparameterizes the model, such that the *same* variance is accounted for by different parameters; it does *not* change the total amount of variance accounted for.
+
+```{r stats-day1}
+nav_day1 <- bind_rows(nav_study1, nav_study2, nav_study3) %>%
+  filter(measurement_id == "D1") %>%
+  # Give every subject a distinct identifier
+  mutate(sub_id = str_c(study, " s", sub_id))
+
+stats_nav_day1_dist2 <- nav_day1 %>%
+  mutate(shortest_path = fct_relevel(shortest_path, "2")) %>%
+  glmmTMB(
+    correct ~ shortest_path + (1 + shortest_path | sub_id) + (1 | study),
+    family = binomial,
+    data = .
+  )
+
+stats_nav_day1_dist3 <- nav_day1 %>%
+  mutate(shortest_path = fct_relevel(shortest_path, "3")) %>%
+  glmmTMB(
+    correct ~ shortest_path + (1 + shortest_path | sub_id) + (1 | study),
+    family = binomial,
+    data = .
+  )
+
+stats_nav_day1_dist4 <- nav_day1 %>%
+  mutate(shortest_path = fct_relevel(shortest_path, "4")) %>%
+  glmmTMB(
+    correct ~ shortest_path + (1 + shortest_path | sub_id) + (1 | study),
+    family = binomial,
+    data = .
+  )
+
+map_dfr(
+  .x = list(
+    "dist-2" = stats_nav_day1_dist2,
+    "dist-3" = stats_nav_day1_dist3,
+    "dist-4" = stats_nav_day1_dist4
+  ),
+  .f = ~tidy(.x, conf.int = TRUE),
+  .id = "ref_cat"
+) %>%
+  check_significance() %>%
+  select(-c(ref_cat, effect, component)) %>%
+  kbl(
+    caption = str_c("<center>", "Navigation accuracy: Day 1", "</center>"),
+    digits = 3
+  ) %>%
+  kable_styling(bootstrap_options = c("responsive")) %>%
+  pack_rows("Ref. Cat. dist-2", 1, 10) %>%
+  pack_rows("Ref. Cat. dist-3", 11, 20) %>%
+  pack_rows("Ref. Cat. dist-4", 21, 30)
+```
+
+We'll plot out the raw data, plus model predictions...
+
+```{r plot-day1}
+predict_nav_day1 <- expand_grid(
+  measurement_id = "D1",
+  shortest_path = factor(2:4),
+  sub_id = NA, study = NA
+) %>%
+  predict_glmmTMB(stats_nav_day1_dist2)
+
+plot_nav_day1 <- bind_rows(nav_study2, nav_study3) %>%
+  filter(measurement_id == "D1") %>%
+  group_by(sub_id, measurement_id, shortest_path) %>%
+  summarise(accuracy = mean(correct), .groups = "drop") %>%
+  ggplot(aes(x=shortest_path, y=accuracy)) +
+  theme_custom() +
+  geom_hline(yintercept = 0.5, linetype = "dashed") +
+  geom_dotplot(
+    binwidth = 0.01,
+    binaxis = "y", stackdir = "center",
+    position = position_dodge(width = 0.75),
+    dotsize = 1, alpha = 0.5, color = NA,
+    show.legend = FALSE
+  ) +
+  geom_pointrange(
+    aes(x = shortest_path, y = fit, ymin = fit - se.fit, ymax = fit + se.fit),
+    data = predict_nav_day1, inherit.aes = FALSE, show.legend = FALSE,
+    position = position_dodge(width = 0.15), linewidth = 1
+  ) +
+  geom_line(
+    aes(x = shortest_path, y = fit, group = measurement_id),
+    data = predict_nav_day1, inherit.aes = FALSE,
+    position = position_dodge(width = 0.15), linewidth = 1
+  ) +
+  scale_x_discrete(name = "Shortest path distance") +
+  scale_y_continuous(
+    name = "Accuracy", labels = scales::percent, breaks = seq(0, 1, 0.1)
+  ) +
+  coord_cartesian(ylim = c(0.4, 1.1)) +
+  theme(legend.position = "bottom") +
+  ggtitle("Human social navigation")
+
+plot_nav_day1
+
+if (knitting) {
+  ggsave(
+    here("figures", str_c("navigation_day1", ".pdf")),
+    plot = plot_nav_day1,
+    width = 8/3, height = 3,
+    units = "in", dpi = 300
+  )
+}
+```
+
+
+# Computational models of social navigation
+
+We'd like to have some mechanistic insights about how people solve navigation problems. To do this, we'll look at two candidate models of navigation: breadth-first search (BFS) and the Successor Representation (SR).
+
+## Simulations
+
+### BFS simulation
+
+```{r load-bfs-data}
+sim_bfs <- here("data", "bfs-sims", "bfs_sims_learned.csv") %>%
+  read_csv(show_col_types = FALSE) %>%
+  filter(
+    two_correct_options == FALSE,
+    shortest_path_given_opts == shortest_path_given_start_end
+  ) %>%
+  mutate(shortest_path = factor(shortest_path_given_opts)) %>%
+  select(
+    shortest_path, startpoint_id, endpoint_id, opt1_id, opt2_id,
+    bfs_choice, bfs_correct_choice, bfs_n_visits_total
+  )
+```
+
+In our implementation, we model the BFS agent having some "threshold" for searching through the network. This can be thought of as a "willingness to spend time/effort performing a search" threshold. Once that threshold is exceeded, it becomes increasingly likely that the agent gives up and chooses randomly.
+
+To see what threshold values might be informative to look at, we'll look at the average number of "searches" that an agent must perform to make a (non-random) decision.
+
+```{r avg-bfs-visits}
+sim_bfs %>%
+  group_by(shortest_path) %>%
+  summarise(avg_n_searches = mean(bfs_n_visits_total)) %>%
+  kbl(
+    caption = str_c("<center>", "Average searches in online-BFS", "</center>"),
+    digits = 2
+  ) %>%
+  kable_styling(bootstrap_options = c("responsive"))
+```
+
+And now we'll plot the model predictions...
+
+```{r plot-bfs-sim}
+bfs_avg_accuracy <- sim_bfs %>%
+  group_by(shortest_path, startpoint_id, endpoint_id, opt1_id, opt2_id) %>%
+  summarise(
+    bfs_accuracy = mean(bfs_correct_choice),
+    bfs_visits = mean(bfs_n_visits_total),
+    .groups = "drop"
+  )
+
+plot_sim_bfs <- bfs_avg_accuracy %>%
+  expand_grid(search_threshold = seq(2, 12, 2)) %>%
+  rowwise() %>%
+  mutate(
+    # Note: p(BFS) is 1-p(give up)
+    p_bfs = softmax(
+      option_values = c(search_threshold, bfs_visits),
+      option_chosen = 1,
+      temperature = 1
+    )
+  ) %>%
+  ungroup() %>%
+  # Weigh the model predictions according to their likelihood
+  mutate(
+    p_give_up = 1 - p_bfs,
+    bfs_threshold_accuracy = (p_bfs * bfs_accuracy) + (p_give_up * (1/2))
+  ) %>%
+  # Format for plotting
+  mutate(
+    search_threshold = str_pad(search_threshold, width = 2, side = "left")
+  ) %>%
+  bind_rows(
+    bfs_avg_accuracy %>%
+      mutate(
+        search_threshold = "Never gives up",
+        bfs_threshold_accuracy = bfs_accuracy
+      )
+  ) %>%
+  # Now plot
+  ggplot(
+    aes(
+      x=shortest_path, y=bfs_threshold_accuracy,
+      color=search_threshold, group=search_threshold
+    )
+  ) +
+  theme_custom() +
+  geom_hline(yintercept = 0.5, linetype = "dashed") +
+  stat_summary(geom = "line", fun = mean, linewidth = 1) +
+  scale_x_discrete(name = "Shortest path distance") +
+  scale_y_continuous(name = "Accuracy", labels = scales::percent) +
+  scale_color_viridis_d(
+    name = "Search threshold", option = "magma",
+    begin = 0.1, end = 0.9, direction = -1
+  ) +
+  guides(color = guide_legend(byrow = TRUE, nrow = 1)) +
+  coord_cartesian(ylim = c(0.5, 1)) +
+  theme(
+    panel.grid = element_blank(),
+    legend.position = "bottom"
+  ) +
+  ggtitle("Simulated BFS navigation")
+
+plot_sim_bfs
+
+if (knitting) {
+  ggsave(
+    here("figures", str_c("simulated_bfs", ".pdf")),
+    plot = plot_sim_bfs,
+    width = 8/3, height = 3,
+    units = "in", dpi = 300
+  )
+}
+```
+
+### SR navigation simulation
+
+```{r get-triallist}
+triallist_nav_learned <- nav_study1 %>%
+  filter(sub_id == 1) %>%
+  select(
+    startpoint_id, endpoint_id, opt1_id, opt2_id,
+    correct_choice, shortest_path
+  ) %>%
+  arrange(startpoint_id, endpoint_id)
+```
+
+We'll create some simulated learning observations.
+
+```{r simulate-observations}
+set.seed(sum(utf8ToInt("Jenny and me was like peas and carrots")))
+
+simulated_paired_associates <- adjlist %>%
+  filter(edge == 1) %>%
+  select(from, to) %>%
+  expand_grid(set = 1:5000, .) %>%
+  group_by(set) %>%
+  slice_sample(prop = 1) %>%
+  ungroup()
+```
+
+And now we'll simulate an "asymptotic" SR and how it performs in the navigation task.
+
+```{r sim-sr-asymptotic}
+simulate_sr <- function(simulated_observations) {
+  simulated_observations %>%
+    expand_grid(gamma = seq(0.1, 0.9, 0.1)) %>%
+    group_by(gamma) %>%
+    nest() %>%
+    mutate(
+      sr = map(
+        .x = data,
+        .f = ~build_rep_sr(
+          learning_data = .x, this_alpha = 0.1, this_gamma = gamma
+        )
+      )
+    ) %>%
+    unnest(sr) %>%
+    ungroup() %>%
+    select(-data)
+}
+
+join_sr <- function(navigation_triallist, simulated_sr) {
+  navigation_triallist %>%
+    left_join(
+      simulated_sr %>%
+        rename(opt1_sr = sr_value, opt1_id = from, endpoint_id = to)
+    ) %>%
+    left_join(
+      simulated_sr %>%
+        rename(opt2_sr = sr_value, opt2_id = from, endpoint_id = to)
+    )
+}
+
+sim_sr_matrix_asymptotic <- simulated_paired_associates %>%
+  simulate_sr()
+
+sim_sr_behavior_asymptotic <- join_sr(
+  triallist_nav_learned, sim_sr_matrix_asymptotic
+) %>%
+  # Feed values through softmax
+  mutate(across(c(opt1_sr, opt2_sr), ~.x * 100)) %>%
+  expand_grid(temperature = 1) %>%
+  rowwise() %>%
+  mutate(
+    p_correct = softmax(
+      option_values = c(opt1_sr, opt2_sr),
+      option_chosen = if_else(correct_choice == opt1_id, 1, 2),
+      temperature = temperature,
+      use_inverse_temperature = TRUE
+    )
+  ) %>%
+  ungroup()
+```
+
+```{r plot-sr-sim-asymptotic}
+plot_sim_sr_asymptotic <- sim_sr_behavior_asymptotic %>%
+  mutate(
+    gamma = factor(gamma),
+    temperature = str_pad(temperature, width = 2, side = "left"),
+    temperature = str_c(unicode_greek["tau"], " = ", temperature)
+  ) %>%
+  group_by(gamma, temperature, shortest_path) %>%
+  summarise(p_correct = mean(p_correct), .groups = "drop") %>%
+  ggplot(aes(x=shortest_path, y=p_correct, color=gamma)) +
+  theme_custom() +
+  facet_grid(rows = vars(temperature)) +
+  geom_hline(yintercept = 0.5, linetype = "dashed") +
+  geom_line(aes(color = gamma, group = gamma), linewidth = 0.8) +
+  scale_x_discrete(name = "Shortest path distance") +
+  scale_y_continuous(name = "Accuracy", labels = scales::percent) +
+  scale_color_viridis_d(
+    name = str_c(unicode_greek["gamma"], " = "), option = "turbo", end = 0.9
+  ) +
+  guides(color = guide_legend(byrow = TRUE, nrow = 1)) +
+  coord_cartesian(ylim = c(0.5, 1)) +
+  theme(legend.position = "bottom") +
+  ggtitle("Simulated SR navigation")
+
+plot_sim_sr_asymptotic
+
+if (knitting) {
+  suppressWarnings(
+    ggsave(
+      here("figures", str_c("simulated_sr", ".pdf")),
+      plot = plot_sim_sr_asymptotic,
+      width = 8/3, height = 3,
+      units = "in", dpi = 300,
+    )
+  )
+  
+  ggsave(
+    here("figures", str_c("simulated_sr_cairo", ".pdf")),
+    plot = plot_sim_sr_asymptotic +
+      guides(color = guide_legend(byrow = TRUE, nrow = 2)),
+    width = 8/3, height = 3,
+    units = "in", dpi = 300,
+    device = cairo_pdf
+  )
+}
+```
+
+## Model comparison
+
+To do model comparison, we'll need to pull in the estimated parameters/likelihoods from the model-fitting.
+
+```{r load-params}
+clean_params_from_raw <- FALSE
+
+if (clean_params_from_raw) {
+  params <- here("data", "param-fits") %>%
+    fs::dir_ls(regexp = "study[[:digit:]]_D[[:digit:]]b?") %>%
+    map_dfr(
+      .f = ~read_csv(.x, show_col_types = FALSE) %>%
+        best_optim_run("dataframe"),
+      .id = "filename"
+    ) %>%
+    mutate(
+      study = str_extract(filename, "study[[:digit:]]"),
+      study = str_remove(study, "study"),
+      study = str_c("Study ", study),
+      measurement_id = str_extract(filename, "_D[[:digit:]]b?"),
+      measurement_id = str_remove(measurement_id, "_"),
+      sub_id = str_extract(filename, "sub-[[:digit:]]+"),
+      sub_id = str_remove(sub_id, "sub-"),
+      sub_id = as.integer(sub_id),
+      model = case_when(
+        str_detect(filename, "_hybrid-") ~ "hybrid",
+        str_detect(filename, "_sr-") ~ "sr",
+        str_detect(filename, "_bfs-") ~ "bfs"
+      )
+    ) %>%
+    select(
+      study, sub_id, measurement_id,
+      model,
+      param_name, param_value = param_value_human_readable,
+      neg_loglik = optim_value
+    ) %>%
+    arrange(study, sub_id, measurement_id, model)
+  
+  params %>%
+    write_csv(here("data", "param-fits", "clean_param_fits.csv"))
+} else {
+  params <- here("data", "param-fits", "clean_param_fits.csv") %>%
+    read_csv(show_col_types = FALSE)
+}
+```
+
+```{r pxp-model-selection}
+source(here("code", "utils", "bayesian_model_selection.R"))
+
+pxp_results <- params %>%
+  select(study, sub_id, measurement_id, model, neg_loglik) %>%
+  distinct() %>%
+  mutate(log_lik = -neg_loglik) %>%
+  select(-neg_loglik) %>%
+  pivot_wider(names_from = model, values_from = log_lik) %>%
+  select(-sub_id) %>%
+  group_by(study, measurement_id) %>%
+  nest() %>%
+  mutate(
+    test = map(
+      .x = data,
+      .f = ~bayesian_model_selection(.x)
+    )
+  ) %>%
+  unnest(test) %>%
+  ungroup() %>%
+  select(-data)
+
+pxp_results %>%
+  ggplot(aes(x=measurement_id, y=pxp, color=model)) +
+  theme_custom() +
+  facet_wrap(~study, scales = "free_x") +
+  geom_point(
+    position = position_dodge(width = 0.75)
+  )
+
+pxp_results %>%
+  select(study, measurement_id, model, pxp) %>%
+  mutate(pxp = as.numeric(pxp)) %>%
+  pivot_wider(
+    names_from = model,
+    values_from = pxp,
+    names_prefix = "pxp_"
+  ) %>%
+  kbl(
+    caption = str_c("<center>", "PXP results", "</center>"),
+    digits = 3
+  ) %>%
+  kable_styling(bootstrap_options = c("responsive"))
+```
+
+## Posterior predictive check
+
+We'll start by simulating the model's predictions for each subject, given their estimated parameters.
+
+```{r ppc-bfs}
+ppc_bfs <- bind_rows(nav_study1, nav_study2, nav_study3) %>%
+  filter(measurement_id %in% c("D1", "D2")) %>%
+  left_join(
+    params %>%
+      filter(model == "bfs") %>%
+      pivot_wider(names_from = param_name, values_from = param_value) %>%
+      select(study, sub_id, measurement_id, search_threshold, lapse_rate)
+  ) %>%
+  left_join(bfs_avg_accuracy) %>%
+  mutate(
+    p_sub_choice_bfs = if_else(
+      sub_choice == correct_choice,
+      bfs_accuracy,
+      1 - bfs_accuracy
+    )
+  ) %>%
+  # What's the probability of *completing* BFS-online all the way through?
+  rowwise() %>%
+  mutate(
+    search_threshold = search_threshold,
+    p_complete_bfs = softmax(
+      option_values = c(search_threshold, bfs_visits),
+      option_chosen = 1,
+      temperature = 1
+    )
+  ) %>%
+  ungroup() %>%
+  # Weigh BFS predictions accordingly
+  mutate(
+    p_give_up = 1 - p_complete_bfs,
+    predicted_correct = (p_complete_bfs * p_sub_choice_bfs) + (p_give_up * 1/2),
+    ### Add lapse rate
+    #   Dividing by 2 is because there are two options to choose from
+    #   Therefore, when lapse rate = 1, this becomes chance = 1/2
+    predicted_correct = predicted_correct * (1-lapse_rate) + (lapse_rate/2)
+  ) %>%
+  # Average over trials
+  group_by(study, sub_id, measurement_id, shortest_path) %>%
+  summarise(
+    empirical = mean(correct),
+    predicted = mean(predicted_correct),
+    .groups = "drop"
+  )
+```
+
+```{r ppc-sr}
+ppc_sr_matrix <- params %>%
+  filter(model == "sr") %>%
+  select(
+    study, sub_id, measurement_id, name = param_name, value = param_value
+  ) %>%
+  pivot_wider() %>%
+  group_by(study, sub_id, measurement_id) %>%
+  nest() %>%
+  mutate(
+    sim_sr = map(
+      .x = data,
+      .f = ~build_rep_sr(
+        learning_data = simulated_paired_associates %>% filter(set %in% 1:100),
+        this_alpha = 0.1,
+        this_gamma = .x$sr_gamma,
+        bidirectional = TRUE
+      )
+    )
+  ) %>%
+  unnest(sim_sr) %>%
+  unnest(data) %>%
+  ungroup()
+
+ppc_sr_behavior <- bind_rows(nav_study1, nav_study2, nav_study3) %>%
+  filter(measurement_id %in% c("D1", "D2")) %>%
+  left_join(
+    ppc_sr_matrix %>%
+      rename(opt1_id = from, endpoint_id = to, opt1_sr = sr_value)
+  ) %>%
+  left_join(
+    ppc_sr_matrix %>%
+      rename(opt2_id = from, endpoint_id = to, opt2_sr = sr_value)
+  ) %>%
+  rowwise() %>%
+  mutate(
+    predicted_correct = softmax(
+      option_values = c(opt1_sr, opt2_sr) * 100,
+      option_chosen = if_else(correct_choice == opt1_id, 1, 2),
+      temperature = softmax_temperature,
+      use_inverse_temperature = TRUE,
+      lapse_rate = lapse_rate
+    )
+  ) %>%
+  ungroup() %>%
+  # Fix trials when the softmax becomes undefined
+  mutate(
+    predicted_correct = case_when(
+      is.nan(predicted_correct) & (sub_choice == correct_choice) ~ 1,
+      is.nan(predicted_correct) & (sub_choice != correct_choice) ~ 0,
+      TRUE ~ predicted_correct
+    )
+  ) %>%
+  # Average over trials
+  group_by(study, sub_id, measurement_id, shortest_path) %>%
+  summarise(
+    empirical = mean(correct),
+    predicted = mean(predicted_correct),
+    .groups = "drop"
+  )
+```
+
+Now that we have both PPCs, we can plot them side-by-side.
+
+```{r plot-ppc-day1}
+plot_ppc_day1 <- ppc_bfs %>%
+  rename(predicted_bfs = predicted) %>%
+  left_join(ppc_sr_behavior %>% rename(predicted_sr = predicted)) %>%
+  pivot_longer(
+    c(empirical, predicted_bfs, predicted_sr),
+    names_to = "agent", values_to = "accuracy"
+  ) %>%
+  filter(measurement_id == "D1") %>%
+  ggplot(aes(x=shortest_path, y=accuracy)) +
+  theme_custom() +
+  geom_hline(yintercept = 0.5, linetype = "dashed") +
+  geom_point(
+    aes(color = agent),
+    alpha = 0.05,
+    position = position_jitterdodge(
+      jitter.width = 0.2, jitter.height = 0, dodge.width = 0.75, seed = 1
+    ),
+    show.legend = FALSE
+  ) +
+  stat_summary(
+    aes(color = agent), geom = "crossbar", fun = mean,
+    position = position_dodge(0.5)
+  ) +
+  scale_x_discrete(name = "Shortest path distance") +
+  scale_y_continuous(
+    name = "Accuracy", labels = scales::percent, breaks = seq(0, 1, 0.25)
+  ) +
+  scale_color_manual(
+    name = NULL,
+    values = c(
+      "empirical"="#fd8d3c",
+      "predicted_bfs"="#8c2d04",
+      "predicted_sr"="#bd0026"
+    ),
+    labels = c("empirical"="Human", "predicted_bfs"="BFS", "predicted_sr"="SR")
+  ) +
+  theme(legend.position = "bottom") +
+  ggtitle("Posterior predictive check")
+
+plot_ppc_day1
+
+if (knitting) {
+  ggsave(
+    here("figures", str_c("ppc_day1", ".pdf")),
+    plot = plot_ppc_day1,
+    width = 8/2, height = 2.5,
+    units = "in", dpi = 300
+  )
+}
+```
+
+## Held-out trials
+
+There were some trials where both Sources had equivalent shortest path distances from the Target. We would expect that BFS would be largely indifferent between the two Sources, but it is possible that humans and/or the SR would make other predictions.
+
+```{r load-tie-data}
+nav_study1_ties <- here("data", "clean-data", "study1_message_passing.csv") %>%
+  read_csv(show_col_types = FALSE) %>%
+  filter(
+    two_correct_options == TRUE,
+    shortest_path_given_opts == shortest_path_given_start_end
+  ) %>%
+  mutate(
+    study = "Study 1",
+    measurement_id = str_c("D", measurement_id),
+    shortest_path = factor(shortest_path_given_opts)
+  ) %>%
+  select(
+    study, sub_id, measurement_id, shortest_path,
+    startpoint_id, endpoint_id,
+    opt1_id, opt2_id,
+    correct_choice, sub_choice,
+    correct, rt
+  ) %>%
+  filter(measurement_id %in% c("D1", "D2"))
+
+nav_study2_ties <- here("data", "clean-data", "study2_message_passing.csv") %>%
+  read_csv(show_col_types = FALSE) %>%
+  filter(
+    two_correct_options == TRUE,
+    shortest_path_given_opts == shortest_path_given_start_end
+  ) %>%
+  mutate(
+    study = "Study 2",
+    measurement_id = case_when(
+      network == "learned" ~ str_c("D", measurement_id),
+      network == "reevaluated" ~ "D2b"
+    ),
+    shortest_path = factor(shortest_path_given_opts)
+  ) %>%
+  select(
+    study, sub_id, measurement_id, shortest_path,
+    startpoint_id, endpoint_id,
+    opt1_id, opt2_id,
+    correct_choice, sub_choice,
+    correct, rt
+  ) %>%
+  filter(measurement_id %in% c("D1", "D2"))
+
+nav_study3_ties <- here("data", "clean-data", "study3_message_passing.csv") %>%
+  read_csv(show_col_types = FALSE) %>%
+  filter(
+    two_correct_options == TRUE,
+    shortest_path_given_opts == shortest_path_given_start_end
+  ) %>%
+  mutate(
+    study = "Study 3",
+    measurement_id = case_when(
+      network == "reevaluated" ~ "D2b",
+      measurement_id == 1 ~ "D1",
+      measurement_id == 2 ~ "D1b",
+      measurement_id == 3 ~ "D2"
+    ),
+    shortest_path = factor(shortest_path_given_opts)
+  ) %>%
+  select(
+    study, sub_id, measurement_id, shortest_path,
+    startpoint_id, endpoint_id,
+    opt1_id, opt2_id,
+    correct_choice, sub_choice,
+    correct, rt
+  ) %>%
+  filter(measurement_id %in% c("D1", "D2"))
+```
+
+```{r ties-human}
+tie_item_analysis_humans <- bind_rows(
+  nav_study1_ties, nav_study2_ties, nav_study3_ties
+) %>%
+  filter(measurement_id == "D1") %>%
+  group_by(shortest_path, startpoint_id, endpoint_id, opt1_id, opt2_id) %>%
+  summarise(
+    p_human_opt1 = mean(sub_choice == opt1_id),
+    .groups = "drop"
+  )
+```
+
+```{r ties-bfs}
+bfs_avg_accuracy_ties <- here("data", "bfs-sims", "bfs_sims_learned.csv") %>%
+  read_csv(show_col_types = FALSE) %>%
+  filter(
+    two_correct_options == TRUE,
+    shortest_path_given_opts == shortest_path_given_start_end
+  ) %>%
+  mutate(shortest_path = factor(shortest_path_given_opts)) %>%
+  select(
+    shortest_path, startpoint_id, endpoint_id, opt1_id, opt2_id,
+    bfs_choice, bfs_correct_choice, bfs_n_visits_total
+  ) %>%
+  group_by(shortest_path, startpoint_id, endpoint_id, opt1_id, opt2_id) %>%
+  summarise(
+    p_bfs_opt1 = mean(bfs_choice == opt1_id),
+    bfs_visits = mean(bfs_n_visits_total),
+    .groups = "drop"
+  )
+
+tie_item_analysis_bfs <- bind_rows(
+  nav_study1_ties, nav_study2_ties, nav_study3_ties
+) %>%
+  filter(measurement_id == "D1") %>%
+  left_join(
+    params %>%
+      filter(model == "bfs") %>%
+      pivot_wider(names_from = param_name, values_from = param_value) %>%
+      select(study, sub_id, measurement_id, search_threshold, lapse_rate)
+  ) %>%
+  left_join(bfs_avg_accuracy_ties) %>%
+  mutate(
+    p_sub_choice_bfs = if_else(
+      sub_choice == opt1_id,
+      p_bfs_opt1,
+      1 - p_bfs_opt1
+    )
+  ) %>%
+  select(-p_bfs_opt1) %>%
+  # What's the probability of *completing* BFS-online all the way through?
+  rowwise() %>%
+  mutate(
+    search_threshold = search_threshold,
+    p_complete_bfs = softmax(
+      option_values = c(search_threshold, bfs_visits),
+      option_chosen = 1,
+      temperature = 1
+    )
+  ) %>%
+  ungroup() %>%
+  # Weigh BFS predictions accordingly
+  mutate(
+    p_give_up = 1 - p_complete_bfs,
+    p_bfs_opt1 = (p_complete_bfs * p_sub_choice_bfs) + (p_give_up * 1/2),
+    ### Add lapse rate
+    #   Dividing by 2 is because there are two options to choose from
+    #   Therefore, when lapse rate = 1, this becomes chance = 1/2
+    p_bfs_opt1 = p_bfs_opt1 * (1-lapse_rate) + (lapse_rate/2)
+  ) %>%
+  # Average over trials
+  # group_by(shortest_path) %>%
+  group_by(shortest_path, startpoint_id, endpoint_id, opt1_id, opt2_id) %>%
+  summarise(
+    p_bfs_opt1 = mean(p_bfs_opt1),
+    .groups = "drop"
+  )
+```
+
+```{r ties-sr}
+tie_item_analysis_sr <- bind_rows(
+  nav_study1_ties, nav_study2_ties, nav_study3_ties
+) %>%
+  filter(measurement_id == "D1") %>%
+  left_join(
+    ppc_sr_matrix %>%
+      select(
+        study, sub_id, measurement_id,
+        opt1_id = from,
+        endpoint_id = to,
+        opt1_sr = sr_value
+      )
+  ) %>%
+  left_join(
+    ppc_sr_matrix %>%
+      select(
+        study, sub_id, measurement_id,
+        opt2_id = from,
+        endpoint_id = to,
+        opt2_sr = sr_value,
+        sr_gamma, softmax_temperature, lapse_rate
+      )
+  ) %>%
+  rowwise() %>%
+  mutate(
+    p_sr_opt1 = softmax(
+      option_values = c(opt1_sr, opt2_sr) * 100,
+      option_chosen = 1,
+      temperature = softmax_temperature,
+      use_inverse_temperature = TRUE,
+      lapse_rate = lapse_rate
+    )
+  ) %>%
+  group_by(shortest_path, startpoint_id, endpoint_id, opt1_id, opt2_id) %>%
+  summarise(
+    p_sr_opt1 = mean(p_sr_opt1, na.rm = TRUE),
+    .groups = "drop"
+  )
+```
+
+```{r plot-ties}
+plot_ties <- tie_item_analysis_humans %>%
+  left_join(tie_item_analysis_bfs) %>%
+  left_join(tie_item_analysis_sr) %>%
+  mutate(item = row_number(), item = factor(item)) %>%
+  pivot_longer(
+    starts_with("p_"),
+    names_to = "agent",
+    values_to = "p_choose_opt1"
+  ) %>%
+  mutate(
+    agent = str_remove_all(agent, "p_|_opt1"),
+    agent = case_when(
+      agent == "human" ~ "Human",
+      agent == "sr" ~ "SR",
+      agent == "bfs" ~ "BFS",
+    ),
+    agent = fct_relevel(agent, "Human", "SR")
+  ) %>%
+  ggplot(aes(x=shortest_path, y=p_choose_opt1)) +
+  theme_custom() +
+  facet_wrap(~agent) +
+  geom_hline(yintercept = 0.5, linetype = "dashed") +
+  geom_point(alpha = 0.25) +
+  stat_summary(geom = "crossbar", fun = mean, color = "red") +
+  scale_x_discrete(name = "Shortest path distance") +
+  scale_y_continuous(
+    name = "p(Choose Source A > B)",
+    labels = scales::percent, breaks = seq(0, 1, 0.25)
+  ) +
+  theme(
+    panel.grid = element_blank(),
+    legend.position = "bottom"
+  ) +
+  ggtitle("Navigation problems with two correct answers")
+
+plot_ties
+
+if (knitting) {
+  ggsave(
+    here("figures", str_c("navigation_heldout_day1", ".pdf")),
+    plot = plot_ties,
+    width = 8/2, height = 2.5,
+    units = "in", dpi = 300
+  )
+}
+```
+
+
+# Does navigation improve after rest?
+
+First, some descriptives...
+
+```{r descriptive-navigation-all}
+bind_rows(nav_study1, nav_study2, nav_study3) %>%
+  group_by(measurement_id, shortest_path) %>%
+  summarise(accuracy = mean(correct), .groups = "drop") %>%
+  arrange(measurement_id, shortest_path) %>%
+  pivot_wider(
+    names_from = shortest_path, values_from = accuracy, names_prefix = "dist-"
+  ) %>%
+  kbl(
+    caption = str_c(
+      "<center>", "Descriptive: Navigation accuracy", "</center>"
+    ),
+    digits = 2
+  ) %>%
+  kable_styling(bootstrap_options = c("responsive"))
+```
+
+## Overnight rest
+
+Now we want to see how navigation accuracy changes from day 1 to day 2. This pools across studies 2-3 (study 1 was only a one-day experiment).
+
+```{r stats-day1-to-day2}
+nav_day1_to_day2 <- bind_rows(nav_study2, nav_study3) %>%
+  filter(measurement_id %in% c("D1", "D2")) %>%
+  # Give every subject a distinct identifier
+  mutate(sub_id = str_c(study, " s", sub_id))
+
+stats_nav_day2_dist2 <- nav_day1_to_day2 %>%
+  mutate(shortest_path = fct_relevel(shortest_path, "2")) %>%
+  glmmTMB(
+    correct ~ shortest_path * measurement_id +
+      (1 + shortest_path + measurement_id | sub_id) + (1 | study),
+    family = binomial,
+    data = .
+  )
+
+stats_nav_day2_dist3 <- nav_day1_to_day2 %>%
+  mutate(shortest_path = fct_relevel(shortest_path, "3")) %>%
+  glmmTMB(
+    correct ~ shortest_path * measurement_id +
+      (1 + shortest_path + measurement_id | sub_id) + (1 | study),
+    family = binomial,
+    data = .
+  )
+
+stats_nav_day2_dist4 <- nav_day1_to_day2 %>%
+  mutate(shortest_path = fct_relevel(shortest_path, "4")) %>%
+  glmmTMB(
+    correct ~ shortest_path * measurement_id +
+      (1 + shortest_path + measurement_id | sub_id) + (1 | study),
+    family = binomial,
+    data = .
+  )
+
+map_dfr(
+  .x = list(
+    "dist-2" = stats_nav_day2_dist2,
+    "dist-3" = stats_nav_day2_dist3,
+    "dist-4" = stats_nav_day2_dist4
+  ),
+  .f = ~tidy(.x, conf.int = TRUE),
+  .id = "ref_cat"
+) %>%
+  check_significance() %>%
+  select(-c(ref_cat, effect, component)) %>%
+  kbl(
+    caption = str_c(
+      "<center>", "Navigation accuracy: Day 1 to Day 2", "</center>"
+    ),
+    digits = 3
+  ) %>%
+  kable_styling(bootstrap_options = c("responsive")) %>%
+  pack_rows("Ref. Cat. dist-2", 1, 17) %>%
+  pack_rows("Ref. Cat. dist-3", 18, 34) %>%
+  pack_rows("Ref. Cat. dist-4", 35, 51)
+```
+
+```{r plot-day1-to-day2}
+predict_nav_day1_to_day2 <- expand_grid(
+  measurement_id = c("D1", "D2"),
+  shortest_path = factor(2:4),
+  sub_id = NA, study = NA
+) %>%
+  predict_glmmTMB(stats_nav_day2_dist2)
+
+plot_nav_day1_to_day2 <- nav_day1_to_day2 %>%
+  group_by(sub_id, measurement_id, shortest_path) %>%
+  summarise(accuracy = mean(correct), .groups = "drop") %>%
+  ggplot(aes(x=shortest_path, y=accuracy, color=measurement_id)) +
+  theme_custom() +
+  geom_hline(yintercept = 0.5, linetype = "dashed") +
+  geom_dotplot(
+    aes(fill = measurement_id),
+    binwidth = 0.01,
+    binaxis = "y", stackdir = "center",
+    position = position_dodge(width = 0.75),
+    dotsize = 1, alpha = 0.5, color = NA,
+    show.legend = FALSE
+  ) +
+  geom_pointrange(
+    aes(
+      x = shortest_path, y = fit,
+      ymin = fit - se.fit, ymax = fit + se.fit,
+      color = measurement_id
+    ),
+    data = predict_nav_day1_to_day2, inherit.aes = FALSE, show.legend = FALSE,
+    position = position_dodge(width = 0.15), linewidth = 1
+  ) +
+  geom_line(
+    aes(
+      x = shortest_path, y = fit,
+      group = measurement_id, color = measurement_id
+    ),
+    data = predict_nav_day1_to_day2, inherit.aes = FALSE,
+    position = position_dodge(width = 0.15), linewidth = 1
+  ) +
+  scale_x_discrete(name = "Shortest path distance") +
+  scale_y_continuous(
+    name = "Accuracy", labels = scales::percent, breaks = seq(0, 1, 0.25)
+  ) +
+  scale_color_manual(
+    name = "Measurement",
+    values = c("D1"="#fa9fb5", "D2"="#7a0177"),
+    labels = c("D1"="Before overnight rest", "D2"="After overnight rest")
+  ) +
+  scale_fill_manual(values = c("D1"="#fa9fb5", "D2"="#7a0177")) +
+  coord_cartesian(ylim = c(0.3, 1.1)) +
+  theme(legend.position = "bottom") +
+  ggtitle("Navigation after overnight rest")
+
+plot_nav_day1_to_day2
+
+if (knitting) {
+  ggsave(
+    here("figures", str_c("navigation_day1_to_day2", ".pdf")),
+    plot = plot_nav_day1_to_day2,
+    width = 4, height = 3,
+    units = "in", dpi = 300
+  )
+}
+```
+
+## Awake rest
+
+Is a brief period of awake rest sufficient for improving navigation accuracy?
+
+```{r stats-awake-rest}
+stats_nav_awake_dist2 <- nav_study3 %>%
+  filter(measurement_id %in% c("D1", "D1b")) %>%
+  mutate(shortest_path = fct_relevel(shortest_path, "2")) %>%
+  glmmTMB(
+    correct ~ shortest_path * measurement_id +
+      (1 + shortest_path + measurement_id | sub_id),
+    family = binomial,
+    data = .
+  )
+
+stats_nav_awake_dist3 <- nav_study3 %>%
+  filter(measurement_id %in% c("D1", "D1b")) %>%
+  mutate(shortest_path = fct_relevel(shortest_path, "3")) %>%
+  glmmTMB(
+    correct ~ shortest_path * measurement_id +
+      (1 + shortest_path + measurement_id | sub_id),
+    family = binomial,
+    data = .
+  )
+
+stats_nav_awake_dist4 <- nav_study3 %>%
+  filter(measurement_id %in% c("D1", "D1b")) %>%
+  mutate(shortest_path = fct_relevel(shortest_path, "4")) %>%
+  glmmTMB(
+    correct ~ shortest_path * measurement_id +
+      (1 + shortest_path + measurement_id | sub_id),
+    family = binomial,
+    data = .
+  )
+
+map_dfr(
+  .x = list(
+    "dist-2" = stats_nav_awake_dist2,
+    "dist-3" = stats_nav_awake_dist3,
+    "dist-4" = stats_nav_awake_dist4
+  ),
+  .f = ~tidy(.x, conf.int = TRUE),
+  .id = "ref_cat"
+) %>%
+  check_significance() %>%
+  select(-c(ref_cat, effect, component)) %>%
+  kbl(
+    caption = str_c("<center>", "Navigation accuracy: Awake Rest", "</center>"),
+    digits = 3
+  ) %>%
+  kable_styling(bootstrap_options = c("responsive")) %>%
+  pack_rows("Ref. Cat. dist-2", 1, 16) %>%
+  pack_rows("Ref. Cat. dist-3", 17, 32) %>%
+  pack_rows("Ref. Cat. dist-4", 33, 48)
+```
+
+```{r plot-awake-rest}
+predict_nav_awake <- expand_grid(
+  measurement_id = c("D1", "D1b"),
+  shortest_path = factor(2:4),
+  sub_id = NA, study = NA
+) %>%
+  predict_glmmTMB(stats_nav_awake_dist2)
+
+plot_nav_awake <- nav_study3 %>%
+  filter(measurement_id %in% c("D1", "D1b")) %>%
+  group_by(sub_id, measurement_id, shortest_path) %>%
+  summarise(accuracy = mean(correct), .groups = "drop") %>%
+  ggplot(aes(x=shortest_path, y=accuracy, color=measurement_id)) +
+  theme_custom() +
+  geom_hline(yintercept = 0.5, linetype = "dashed") +
+  geom_dotplot(
+    aes(fill = measurement_id),
+    binwidth = 0.01,
+    binaxis = "y", stackdir = "center",
+    position = position_dodge(width = 0.75),
+    dotsize = 1, alpha = 0.5, color = NA,
+    show.legend = FALSE
+  ) +
+  geom_pointrange(
+    aes(
+      x = shortest_path, y = fit,
+      ymin = fit - se.fit, ymax = fit + se.fit,
+      color = measurement_id
+    ),
+    data = predict_nav_awake, inherit.aes = FALSE, show.legend = FALSE,
+    position = position_dodge(width = 0.15), linewidth = 1
+  ) +
+  geom_line(
+    aes(
+      x = shortest_path, y = fit,
+      group = measurement_id, color = measurement_id
+    ),
+    data = predict_nav_awake, inherit.aes = FALSE,
+    position = position_dodge(width = 0.15), linewidth = 1
+  ) +
+  scale_x_discrete(name = "Shortest path distance") +
+  scale_y_continuous(
+    name = "Accuracy", labels = scales::percent, breaks = seq(0, 1, 0.25)
+  ) +
+  scale_color_manual(
+    name = "Measurement",
+    values = c("D1"="#fa9fb5", "D1b"="#2c7fb8"),
+    labels = c("D1"="Before overnight rest", "D1b"="After awake rest")
+  ) +
+  scale_fill_manual(values = c("D1"="#fa9fb5", "D1b"="#2c7fb8")) +
+  coord_cartesian(ylim = c(0.3, 1.1)) +
+  theme(legend.position = "bottom") +
+  ggtitle("Navigation after awake rest")
+
+plot_nav_awake
+
+if (knitting) {
+  ggsave(
+    here("figures", str_c("navigation_awake_rest", ".pdf")),
+    plot = plot_nav_awake,
+    width = 4, height = 3,
+    units = "in", dpi = 300
+  )
+}
+```
+
+## SR replay simulation
+
+Before starting to do any simulation, we first want to know how much replay an agent can fit into different periods of time. Based on past research measuring neural replay events, we'll assume that it takes about 50ms for the brain to replay a single item from a sequence. This will let us calculate the total number of items that could be replayed in each epoch. To simplify the process of actually running the simulation, we'll convert this quantity into the number of "sets" that can be replayed, where a single "set" consists of the total number of relationships in the network (i.e., the number of undirected edges = 17, meaning that each set consists of 34 observations because each set contains observations of both A->B and B->A).
+
+```{r avail-sr-replay-time}
+tibble(minutes_for_replay = c(1, 5, 15, 30, 60, 120)) %>%
+  mutate(
+    n_items = minutes_for_replay / (0.05 / 60),
+    n_sets = n_items / 34
+  ) %>%
+  kbl(
+    caption = str_c("<center>", "SR replay time", "</center>"),
+    digits = 2
+  ) %>%
+  kable_styling(bootstrap_options = c("responsive"))
+```
+
+```{r simulate-sr-replay}
+sim_replay_0_min <- simulated_paired_associates %>%
+  filter(set <= 6) %>%
+  simulate_sr() %>%
+  mutate(replay_time = 0)
+
+sim_replay_1_min <- simulated_paired_associates %>%
+  filter(set <= 35 + 6) %>%
+  simulate_sr() %>%
+  mutate(replay_time = 1)
+
+sim_replay_5_min <- simulated_paired_associates %>%
+  filter(set <= 176 + 6) %>%
+  simulate_sr() %>%
+  mutate(replay_time = 5)
+
+sim_replay_60_min <- simulated_paired_associates %>%
+  filter(set <= 2117 + 6) %>%
+  simulate_sr() %>%
+  mutate(replay_time = 60)
+```
+
+```{r plot-sr-sim-replay}
+plot_sim_sr_replay <- bind_rows(
+  join_sr(triallist_nav_learned, sim_replay_0_min),
+  join_sr(triallist_nav_learned, sim_replay_1_min),
+  join_sr(triallist_nav_learned, sim_replay_5_min),
+  join_sr(triallist_nav_learned, sim_replay_60_min)
+) %>%
+  # Feed values through softmax
+  mutate(across(c(opt1_sr, opt2_sr), ~.x * 100)) %>%
+  expand_grid(temperature = 1) %>%
+  rowwise() %>%
+  mutate(
+    p_correct = softmax(
+      option_values = c(opt1_sr, opt2_sr),
+      option_chosen = if_else(correct_choice == opt1_id, 1, 2),
+      temperature = temperature,
+      use_inverse_temperature = TRUE
+    )
+  ) %>%
+  ungroup() %>%
+  # For plotting
+  mutate(
+    gamma = factor(gamma),
+    temperature = str_pad(temperature, width = 2, side = "left"),
+    temperature = str_c(unicode_greek["tau"], " = ", temperature),
+    replay_time = str_pad(replay_time, width = 2, side = "left"),
+    replay_time = case_when(
+      str_detect(replay_time, "1$") ~ str_c(replay_time, " minute of replay"),
+      replay_time == " 0" ~ "No replay",
+      TRUE ~ str_c(replay_time, " minutes of replay")
+    ),
+    replay_time = fct_relevel(replay_time, "No replay")
+  ) %>%
+  group_by(replay_time, gamma, temperature, shortest_path) %>%
+  summarise(p_correct = mean(p_correct), .groups = "drop") %>%
+  # Plot
+  ggplot(aes(x=shortest_path, y=p_correct, color=gamma)) +
+  theme_custom() +
+  facet_grid(cols = vars(replay_time), rows = vars(temperature)) +
+  geom_hline(yintercept = 0.5, linetype = "dashed") +
+  geom_line(aes(color = gamma, group = gamma), linewidth = 0.8) +
+  scale_x_discrete(name = "Shortest path distance") +
+  scale_y_continuous(name = "Accuracy", labels = scales::percent) +
+  scale_color_viridis_d(
+    name = str_c(unicode_greek["gamma"], " = "), option = "turbo", end = 0.9
+  ) +
+  guides(color = guide_legend(byrow = TRUE, nrow = 1)) +
+  coord_cartesian(ylim = c(0.5, 1)) +
+  theme(legend.position = "bottom") +
+  ggtitle("Simulated effects of SR replay on navigation")
+
+plot_sim_sr_replay
+
+if (knitting) {
+  ggsave(
+    here("figures", str_c("simulated_replay", ".pdf")),
+    plot = plot_sim_sr_replay,
+    width = 7, height = 2.5,
+    units = "in", dpi = 300,
+    device = cairo_pdf
+  )
+}
+```
+
+## PPC before/after rest
+
+```{r plot-ppc-day1-day2}
+plot_ppc_day1_to_day2 <- ppc_sr_behavior %>%
+  filter(study %in% c("Study 2", "Study 3")) %>%
+  mutate(
+    measurement_id = case_when(
+      measurement_id == "D1" ~ "Before rest",
+      measurement_id == "D2" ~ "After rest"
+    ),
+    measurement_id = fct_relevel(measurement_id, "Before rest")
+  ) %>%
+  pivot_longer(c(empirical, predicted)) %>%
+  ggplot(aes(x=shortest_path, y=value)) +
+  theme_custom() +
+  facet_wrap(~measurement_id) +
+  geom_hline(yintercept = 0.5, linetype = "dashed") +
+  geom_point(
+    aes(color = name),
+    alpha = 0.05,
+    position = position_jitterdodge(
+      jitter.width = 0.2, jitter.height = 0, dodge.width = 0.5, seed = 1
+    ),
+    show.legend = FALSE
+  ) +
+  stat_summary(
+    aes(color = name), geom = "crossbar", fun = mean,
+    position = position_dodge(0.5)
+  ) +
+  scale_x_discrete(name = "Shortest path distance") +
+  scale_y_continuous(
+    name = "Accuracy", labels = scales::percent, breaks = seq(0, 1, 0.25)
+  ) +
+  scale_color_manual(
+    name = NULL,
+    values = c("empirical"="#fd8d3c", "predicted"="#bd0026"),
+    labels = c("empirical"="Human", "predicted"="SR")
+  ) +
+  theme(legend.position = "bottom") +
+  ggtitle("Posterior predictive check")
+
+plot_ppc_day1_to_day2
+
+if (knitting) {
+  ggsave(
+    here("figures", str_c("ppc_day2", ".pdf")),
+    plot = plot_ppc_day1_to_day2,
+    width = 8/3, height = 2.5,
+    units = "in", dpi = 300
+  )
+}
+```
+
+
+## Relating model parameters to navigation
+
+Does estimated gamma significantly increase after overnight rest?
+
+```{r stats-gamma-increase}
+params %>%
+  filter(
+    study %in% c("Study 2", "Study 3"),
+    measurement_id %in% c("D1", "D2"),
+    model == "sr",
+    param_name == "sr_gamma"
+  ) %>%
+  select(study, sub_id, measurement_id, sr_gamma = param_value) %>%
+  group_by(measurement_id) %>%
+  summarise(median_gamma = median(sr_gamma)) %>%
+  kbl(
+    caption = str_c(
+      "<center>", "Median SR gamma before/after overnight rest", "</center>"
+    ),
+    digits = 3
+  ) %>%
+  kable_styling(bootstrap_options = c("responsive"))
+
+params %>%
+  filter(
+    study %in% c("Study 2", "Study 3"),
+    measurement_id %in% c("D1", "D2"),
+    model == "sr",
+    param_name == "sr_gamma"
+  ) %>%
+  select(study, sub_id, measurement_id, sr_gamma = param_value) %>%
+  pivot_wider(names_from = measurement_id, values_from = sr_gamma) %>%
+  with(
+    wilcox.test(
+      D2, D1, alternative = "greater", paired = TRUE, conf.int = TRUE
+    )
+  ) %>%
+  tidy() %>%
+  kbl(
+    caption = str_c(
+      "<center>", "Increase in SR gamma after overnight rest", "</center>"
+    ),
+    digits = 3
+  ) %>%
+  kable_styling(bootstrap_options = c("responsive"))
+```
+
+```{r plot-gamma-increase}
+plot_gamma_change <- params %>%
+  filter(
+    study %in% c("Study 2", "Study 3"),
+    measurement_id %in% c("D1", "D2"),
+    model == "sr",
+    param_name == "sr_gamma"
+  ) %>%
+  select(study, sub_id, measurement_id, sr_gamma = param_value) %>%
+  ggplot(aes(x=measurement_id, y=sr_gamma, color=measurement_id)) +
+  theme_custom() +
+  geom_point(
+    position = position_jitterdodge(
+      jitter.width = 0.25, jitter.height = 0, dodge.width = 0.5, seed = 1
+    ),
+    alpha = 0.25,
+    show.legend = FALSE
+  ) +
+  stat_summary(
+    geom = "crossbar", fun = median, position = "dodge", show.legend = FALSE
+  ) +
+  scale_x_discrete(
+    name = "Measurement",
+    labels = c("D1"="Before rest", "D2"="After rest")
+  ) +
+  scale_y_continuous(
+    name = str_c("Estimated ", unicode_greek["gamma"]),
+    breaks = seq(0, 1, 0.25)
+  ) +
+  scale_color_manual(
+    name = "Measurement",
+    values = c("D1"="#fa9fb5", "D2"="#7a0177"),
+    labels = c("D1"="Before rest", "D2"="After rest")
+  ) +
+  coord_cartesian(ylim = c(0, 1.1)) +
+  theme(legend.position = "bottom") +
+  ggtitle(
+    str_c(
+      unicode_greek["Delta"], unicode_greek["gamma"], " after overnight rest"
+    )
+  )
+
+plot_gamma_change
+
+if (knitting) {
+  ggsave(
+    here("figures", str_c("gamma_change", ".pdf")),
+    plot = plot_gamma_change,
+    width = 8/3, height = 2.5,
+    units = "in", dpi = 300,
+    device = cairo_pdf
+  )
+}
+```
+
+Are changes in estimated gamma related to changes in navigation behaviors?
+
+```{r stats-gamma-accuracy}
+bind_rows(nav_study2, nav_study3) %>%
+  filter(measurement_id %in% c("D1", "D2")) %>%
+  group_by(study, sub_id, measurement_id, shortest_path) %>%
+  summarise(accuracy = mean(correct), .groups = "drop") %>%
+  pivot_wider(names_from = measurement_id, values_from = accuracy) %>%
+  mutate(delta_accuracy = D2 - D1) %>%
+  select(-c(D1, D2)) %>%
+  # 
+  left_join(
+    params %>%
+      filter(
+        study %in% c("Study 2", "Study 3"),
+        measurement_id %in% c("D1", "D2"),
+        model == "sr",
+        param_name == "sr_gamma"
+      ) %>%
+      select(study, sub_id, measurement_id, sr_gamma = param_value) %>%
+      pivot_wider(names_from = measurement_id, values_from = sr_gamma) %>%
+      mutate(delta_sr = D2 - D1) %>%
+      select(-c(D1, D2)),
+    by = c("study", "sub_id")
+  ) %>%
+  group_by(shortest_path) %>%
+  nest() %>%
+  mutate(
+    test = map(
+      .x = data,
+      .f = ~with(
+        .x,
+        cor.test(
+          delta_accuracy, delta_sr,
+          method = "spearman", exact = FALSE, alternative = "greater"
+        )
+      ) %>% tidy()
+    )
+  ) %>%
+  unnest(test) %>%
+  ungroup() %>%
+  select(-data) %>%
+  kbl(
+    caption = str_c(
+      "<center>", "∆ Accuracy ~ ∆ SR gamma (after overnight rest)", "</center>"
+    ),
+    digits = 3
+  ) %>%
+  kable_styling(bootstrap_options = c("responsive"))
+```
+
+```{r plot-gamma-accuracy}
+plot_gamma_accuracy_change <- bind_rows(nav_study2, nav_study3) %>%
+  filter(measurement_id %in% c("D1", "D2")) %>%
+  group_by(study, sub_id, measurement_id, shortest_path) %>%
+  summarise(accuracy = mean(correct), .groups = "drop") %>%
+  pivot_wider(names_from = measurement_id, values_from = accuracy) %>%
+  mutate(delta_accuracy = D2 - D1) %>%
+  select(-c(D1, D2)) %>%
+  # 
+  left_join(
+    params %>%
+      filter(
+        study %in% c("Study 2", "Study 3"),
+        measurement_id %in% c("D1", "D2"),
+        model == "sr",
+        param_name == "sr_gamma"
+      ) %>%
+      select(study, sub_id, measurement_id, sr_gamma = param_value) %>%
+      pivot_wider(names_from = measurement_id, values_from = sr_gamma) %>%
+      mutate(delta_sr = D2 - D1) %>%
+      select(-c(D1, D2)),
+    by = c("study", "sub_id")
+  ) %>%
+  ggplot(aes(x=delta_sr, y=delta_accuracy, color=shortest_path)) +
+  theme_custom() +
+  geom_hline(yintercept = 0, linetype = "dashed") +
+  geom_vline(xintercept = 0, linetype = "dashed") +
+  geom_point(alpha = 0.25, show.legend = FALSE) +
+  geom_smooth(method = "lm", se = FALSE, linewidth = 1.5) +
+  scale_x_continuous(name = str_c("Change in ", unicode_greek["gamma"])) +
+  scale_y_continuous(name = "Change in accuracy") +
+  scale_color_manual(
+    name = "Shortest path distance",
+    values = c("#88CCEE", "#CC6677", "#DDCC77")
+  ) +
+  coord_cartesian(xlim = c(-1, 1.1)) +
+  theme(legend.position = "bottom") +
+  ggtitle(
+    str_c(
+      unicode_greek["Delta"], "Navigation ~ ",
+      unicode_greek["Delta"], unicode_greek["gamma"]
+    )
+  )
+
+plot_gamma_accuracy_change
+
+if (knitting) {
+  suppressWarnings(
+    ggsave(
+      here("figures", str_c("gamma_accuracy_change", ".pdf")),
+      plot = plot_gamma_accuracy_change,
+      width = 8/3, height = 2.5,
+      units = "in", dpi = 300
+    )
+  )
+  
+  ggsave(
+    here("figures", str_c("gamma_accuracy_change_cairo", ".pdf")),
+    plot = plot_gamma_accuracy_change,
+    width = 8/3, height = 2.5,
+    units = "in", dpi = 300,
+    device = cairo_pdf
+  )
+}
+```
+
+
+# Evidence of cached representation
+
+Here, we're trying to get a sense for what is being cached, and trying to see if there's evidence that caching (as opposed to model-based planning) is the primary driver of navigation improvement after overnight rest.
+
+## Simulation visualization
+
+```{r plot-network-with-sr}
+butterfly_layout <- create_layout(g, layout = "stress")
+
+plot_network_with_sr <- sim_sr_matrix_asymptotic %>%
+  mutate(
+    from_sorted = if_else(from < to, from, to),
+    to_sorted = if_else(from < to, to, from)
+  ) %>%
+  group_by(gamma, from = from_sorted, to = to_sorted) %>%
+  summarise(sr_value = mean(sr_value)) %>%
+  filter(round(gamma, 1) %in% c(0.1, 0.5, 0.9)) %>%
+  filter(sr_value > 0.05) %>%
+  left_join(adjlist) %>%
+  filter(from < to) %>%
+  mutate(
+    edge = factor(edge),
+    gamma = str_c(unicode_greek["gamma"], " = ", gamma)
+  ) %>%
+  tbl_graph(edges = ., directed = FALSE) %>%
+  mutate(name = row_number()) %>%
+  ggraph("manual", x=butterfly_layout$x, y=butterfly_layout$y) +
+  theme_network() +
+  facet_edges(~gamma, ncol = 1) +
+  geom_edge_link(aes(alpha = sr_value, color = edge)) +
+  geom_node_label(aes(label = name)) +
+  scale_edge_color_manual(
+    name = NULL,
+    values = c("0"="red", "1"="black"),
+    labels = c("0"="Inferred connections", "1"="Observed connections")
+  ) +
+  scale_edge_alpha(name = "p(Target | Source)") +
+  theme(
+    legend.position = "bottom",
+    legend.box = "vertical",
+    strip.background = element_blank(),
+    strip.text = element_text(size = 13)
+  ) +
+  ggtitle("Cognitive maps predicted by SR")
+
+plot_network_with_sr
+
+if (knitting) {
+  suppressWarnings(
+    ggsave(
+      here("figures", str_c("network_with_sr", ".pdf")),
+      plot = plot_network_with_sr,
+      width = 3.5, height = 6,
+      units = "in", dpi = 300
+    )
+  )
+  
+  ggsave(
+    here("figures", str_c("network_with_sr_cairo", ".pdf")),
+    plot = plot_network_with_sr,
+    width = 3.5, height = 6,
+    units = "in", dpi = 300,
+    device = cairo_pdf
+  )
+}
+```
+
+## Transition reevaluation
+
+Following transition reevaluation, a caching account predicts that people's navigation should get worse relative to their performance after overnight rest. In contrast, a planning account predicts that people's navigation should not be greatly impacted by a relatively small set of changes.
+
+```{r stats-reevaluation}
+stats_nav_tr_dist2 <- bind_rows(nav_study2, nav_study3) %>%
+  filter(measurement_id %in% c("D1", "D2", "D2b")) %>%
+  mutate(
+    measurement_id = fct_relevel(measurement_id, "D2b"),
+    shortest_path = fct_relevel(shortest_path, "2")
+  ) %>%
+  glmmTMB(
+    correct ~ shortest_path * measurement_id +
+      (1 + shortest_path + measurement_id | sub_id) + (1 | study),
+    family = binomial,
+    data = .
+  )
+
+stats_nav_tr_dist3 <- bind_rows(nav_study2, nav_study3) %>%
+  filter(measurement_id %in% c("D1", "D2", "D2b")) %>%
+  mutate(
+    measurement_id = fct_relevel(measurement_id, "D2b"),
+    shortest_path = fct_relevel(shortest_path, "3")
+  ) %>%
+  glmmTMB(
+    correct ~ shortest_path * measurement_id +
+      (1 + shortest_path + measurement_id | sub_id) + (1 | study),
+    family = binomial,
+    data = .
+  )
+
+stats_nav_tr_dist4 <- bind_rows(nav_study2, nav_study3) %>%
+  filter(measurement_id %in% c("D1", "D2", "D2b")) %>%
+  mutate(
+    measurement_id = fct_relevel(measurement_id, "D2b"),
+    shortest_path = fct_relevel(shortest_path, "4")
+  ) %>%
+  glmmTMB(
+    correct ~ shortest_path * measurement_id +
+      (1 + shortest_path + measurement_id | sub_id) + (1 | study),
+    family = binomial,
+    data = .
+  )
+
+map_dfr(
+  .x = list(
+    "dist-2" = stats_nav_tr_dist2,
+    "dist-3" = stats_nav_tr_dist3,
+    "dist-4" = stats_nav_tr_dist4
+  ),
+  .f = ~tidy(.x, conf.int = TRUE),
+  .id = "ref_cat"
+) %>%
+  check_significance() %>%
+  select(-c(ref_cat, effect, component)) %>%
+  kbl(
+    caption = str_c(
+      "<center>", "Navigation accuracy: Transition Reevaluation", "</center>"
+    ),
+    digits = 3
+  ) %>%
+  kable_styling(bootstrap_options = c("responsive")) %>%
+  pack_rows("Ref. Cat. dist-2", 1, 25) %>%
+  pack_rows("Ref. Cat. dist-3", 26, 50) %>%
+  pack_rows("Ref. Cat. dist-4", 51, 75)
+```
+
+```{r plot-tr}
+predict_tr <- expand_grid(
+  measurement_id = c("D1", "D2", "D2b"),
+  shortest_path = factor(2:4),
+  sub_id = NA, study = NA
+) %>%
+  predict_glmmTMB(stats_nav_tr_dist2)
+
+plot_nav_tr <- nav_study3 %>%
+  filter(measurement_id %in% c("D1", "D2", "D2b")) %>%
+  group_by(sub_id, measurement_id, shortest_path) %>%
+  summarise(accuracy = mean(correct), .groups = "drop") %>%
+  ggplot(aes(x=shortest_path, y=accuracy, color=measurement_id)) +
+  theme_custom() +
+  geom_hline(yintercept = 0.5, linetype = "dashed") +
+  geom_dotplot(
+    aes(fill = measurement_id),
+    binwidth = 0.01,
+    binaxis = "y", stackdir = "center",
+    position = position_dodge(width = 0.75),
+    dotsize = 1, alpha = 0.5, color = NA,
+    show.legend = FALSE
+  ) +
+  geom_pointrange(
+    aes(
+      x = shortest_path, y = fit,
+      ymin = fit - se.fit, ymax = fit + se.fit,
+      color = measurement_id
+    ),
+    data = predict_tr, inherit.aes = FALSE, show.legend = FALSE,
+    position = position_dodge(width = 0.25), linewidth = 1
+  ) +
+  geom_line(
+    aes(
+      x = shortest_path, y = fit,
+      group = measurement_id, color = measurement_id
+    ),
+    data = predict_tr, inherit.aes = FALSE,
+    position = position_dodge(width = 0.25), linewidth = 1
+  ) +
+  scale_x_discrete(name = "Shortest path distance") +
+  scale_y_continuous(
+    name = "Accuracy", labels = scales::percent, breaks = seq(0, 1, 0.25)
+  ) +
+  scale_color_manual(
+    name = "Measurement",
+    values = c("D1"="#fa9fb5", "D2"="#7a0177", "D2b"="#238b45"),
+    labels = c(
+      "D1"="Before overnight rest",
+      "D2"="After overnight rest",
+      "D2b"="After reevaluation"
+    )
+  ) +
+  scale_fill_manual(
+    values = c("D1"="#fa9fb5", "D2"="#7a0177", "D2b"="#238b45")
+  ) +
+  coord_cartesian(ylim = c(0.3, 1.1)) +
+  theme(legend.position = "bottom") +
+  ggtitle("Navigation after transition reevaluation")
+
+plot_nav_tr
+
+if (knitting) {
+  ggsave(
+    here("figures", str_c("navigation_reevaluation", ".pdf")),
+    plot = plot_nav_tr,
+    width = 4, height = 4,
+    units = "in", dpi = 300
+  )
+}
+```
+
+
+# Session info
+
+For reproducibility.
+
+```{r session-info}
+sessionInfo()
+```
+
