@@ -1,23 +1,13 @@
 #### Initialize ####
 
-# Set meta-parameters (for local use/testing)
-run_on_cluster <- TRUE
-this_study <- 3
-this_measurement <- "D1"
-# this_model <- "bfs-online"
-this_model <- "sr-cached"
-# this_model <- "hybrid-bfs-sr"
-this_many_runs <- 2
-this_many_iter_per_run <- 1000
-this_sub <- 13  # Just for testing
+run_on_cluster <- FALSE
 
 # Keep dependencies to a minimum
 library(tidyverse)
 library(here)
 library(tictoc)
 
-# If running on the cluster, overwrite all the meta-parameters
-if ( run_on_cluster ) {
+if (run_on_cluster) {
   # What's the objective function for the model we're estimating?
   # Get arg from shell script
   this_study <- commandArgs(trailingOnly = TRUE)[1]
@@ -30,6 +20,18 @@ if ( run_on_cluster ) {
   # Meta-parameters
   this_many_runs <- 25
   this_many_iter_per_run <- 5000
+} else {
+  # For local testing/debugging
+  this_study <- 3
+  this_measurement <- "D1"
+  this_model <- c(
+    "bfs-forward-two-source", "katz-analytical", "sr-analytical"
+  )[2]
+  
+  this_sub <- 13
+  
+  this_many_runs <- 2
+  this_many_iter_per_run <- 1000
 }
 
 # Create all needed directories
@@ -49,6 +51,7 @@ if (run_on_cluster) {
 # Load in utils
 source(here("code", "utils", "modeling_utils.R"))
 source(here("code", "utils", "representation_utils.R"))
+source(here("code", "fit-params", "objective_functions.R"))
 
 
 #### Load/tidy data ####
