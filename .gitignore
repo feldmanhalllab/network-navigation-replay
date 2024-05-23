@@ -3,6 +3,10 @@
 # macOS
 .DS_Store
 
+# Data/outputs to be archived elsewhere because GitHub isn't for storage...
+/data/untracked/*
+/data/param-fits/*
+
 
 ########################
 ### Python gitignore ###
