@@ -11,18 +11,38 @@
 
 #SBATCH --output=bfs-sim-learned.out
 
-module load R/4.2.0
-module load gcc/10.2 pcre2/10.35 intel/2020.2 texlive/2018 pandoc
-
 workflow_name="simulate-bfs"
 
-parent_dir=$(Rscript -e "cat(here::here())")
-output_dir=${parent_dir}/outputs
-# save_dir=${output_dir}/${workflow_name}
+### Boilerplate setup
 
-mkdir -m 775 ${output_dir} || echo "Output directory already exists"
-# mkdir -m 775 ${save_dir} || echo "Save directory already exists"
+module load r/4.4.0
 
-cd ${parent_dir}/code/${workflow_name}
+start_dir=$(pwd)
+home_dir=$HOME
+
+while :
+do
+	current_dir=$(pwd)
+	if [[ "$current_dir" == "$home_dir" ]]; then
+		echo "Failed to find .here"
+		cd $start_dir
+		break
+	fi
+
+	if test -f ".here"; then
+		here=$(realpath ${current_dir})
+		echo ".here found at $here"
+		cd $start_dir
+		break
+	else
+		cd ../
+	fi
+done
+
+cd ${here}/code/${workflow_name}
+
+
+### Run script
 
 Rscript bfs_sim_learned.R
+
