@@ -70,8 +70,9 @@ calculate_bic <- function(n_params, n_datapoints, neg_loglik) {
 
 #### Tidy optimization ####
 
-run_optim <- function(max_iter_per_run, objective_function,
-                      param_guesses, ...) {
+run_optim <- function(
+    max_iter_per_run, objective_function, param_guesses, ...
+) {
   ### Note: I write my objective functions so that `param_names` is a required
   #   named argument. This presents a bit of a headache because I also want to
   #   use the parameter names as an argument for `optim_to_tibble`. So the

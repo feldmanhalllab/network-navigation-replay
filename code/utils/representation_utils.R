@@ -1,26 +1,27 @@
 #### SR utils ####
 
-build_successor <- function(
-    successor_matrix, alpha, gamma,
-    observations, sr_value_col_name,
-    bidirectional = TRUE) {
+build_successor_td_0 <- function(
+    successor_matrix, observation_matrix,
+    sr_alpha, sr_gamma,
+    bidirectional = FALSE
+) {
   
   sr_update <- function (
-    input_matrix, alpha, gamma,
+    input_matrix, sr_alpha, sr_gamma,
     previous_state, current_state, 
-    bidirectional = TRUE
+    bidirectional
   ) {
     forward_onehot <- input_matrix[previous_state, ] * 0
     forward_onehot[current_state] <- 1
     forward_delta <- (
       forward_onehot +
-        (gamma * input_matrix[current_state, ]) -
+        (sr_gamma * input_matrix[current_state, ]) -
         input_matrix[previous_state, ]
     )
     
     output <- input_matrix
     output[previous_state, ] <- (
-      input_matrix[previous_state, ] + (alpha * forward_delta)
+      input_matrix[previous_state, ] + (sr_alpha * forward_delta)
     )
     
     if (bidirectional) {
@@ -28,53 +29,130 @@ build_successor <- function(
       backward_onehot[previous_state] <- 1
       backward_delta <- (
         backward_onehot +
-          (gamma * input_matrix[previous_state, ]) -
+          (sr_gamma * input_matrix[previous_state, ]) -
           input_matrix[current_state, ]
       )
       output[current_state, ] <- (
-        input_matrix[current_state, ] + (alpha * backward_delta)
+        input_matrix[current_state, ] + (sr_alpha * backward_delta)
       )
     }
     return(output)
   }
   
-  obs_matrix <- as.matrix(select(observations, from, to))
-  for (j in 1:nrow(observations)) {
-    previous_state <- obs_matrix[j, 1]
-    current_state <- obs_matrix[j, 2]
+  for (j in 1:nrow(observation_matrix)) {
+    previous_state <- observation_matrix[j, 1]
+    current_state <- observation_matrix[j, 2]
     successor_matrix <- sr_update(
       successor_matrix,
-      alpha,
-      gamma,
+      sr_alpha,
+      sr_gamma,
       previous_state,
       current_state,
-      bidirectional = TRUE
+      bidirectional
     )
   }
   
-  return(
-    successor_matrix %>%
+  # Return states using integers or strings?
+  if (is.null(rownames(successor_matrix))) {
+    rownames_are_strings <- FALSE
+  } else {
+    rownames_are_strings <- suppressWarnings(
+      all(is.na(as.integer(rownames(successor_matrix))))
+    )
+  }
+  
+  if (rownames_are_strings == FALSE) {
+    out <- successor_matrix %>%
       as.data.frame() %>%
       mutate(from = row_number()) %>%
-      pivot_longer(
-        cols = -from,
-        names_to = "to",
-        values_to = sr_value_col_name
-      ) %>%
+      pivot_longer(cols = -from, names_to = "to", values_to = "sr_value") %>%
       mutate(
         to = str_remove(to, "V"),
-        to = as.numeric(to)
+        across(c(from, to), as.numeric)
       ) %>%
-      mutate(
-        alpha = alpha,
-        gamma = gamma
-      )
-  )
+      mutate(sr_alpha = sr_alpha, sr_gamma = sr_gamma)
+  } else {
+    out <- successor_matrix %>%
+      as.data.frame() %>%
+      rownames_to_column("from") %>%
+      pivot_longer(cols = -from, names_to = "to", values_to = "sr_value") %>%
+      mutate(sr_alpha = sr_alpha, sr_gamma = sr_gamma)
+  }
+  
+  return(out)
 }
+
+
+learn_successor_td_lambda <- function(
+    successor_matrix, observation_matrix,
+    sr_alpha, sr_gamma, sr_lambda
+) {
+  # Should the output states be returned as integers or strings?
+  if (is.null(rownames(successor_matrix))) {
+    rownames_are_strings <- FALSE
+  } else {
+    rownames_are_strings <- suppressWarnings(
+      all(is.na(as.integer(rownames(successor_matrix))))
+    )
+  }
+  
+  # Function depends on indexing named rows/columns
+  if (rownames_are_strings == FALSE) {
+    colnames(successor_matrix) <- 1:ncol(successor_matrix)
+    rownames(successor_matrix) <- 1:ncol(successor_matrix)
+  }
+  
+  # Initialize eligibility traces to 0
+  eligibility_traces <- rep(0, ncol(successor_matrix))
+  names(eligibility_traces) <- colnames(successor_matrix)
+  
+  for (trial in 1:nrow(observation_matrix)) {
+    current_state <- observation_matrix[trial, 2]
+    previous_state <- observation_matrix[trial, 1]
+    
+    # Update eligibility traces
+    eligibility_traces <- sr_gamma * sr_lambda * eligibility_traces
+    eligibility_traces[previous_state] <- eligibility_traces[previous_state] + 1
+    
+    # Element-wise update
+    for (M_i in rownames(successor_matrix)) {
+      for (M_j in colnames(successor_matrix)) {
+        # Update SR matrix
+        prediction_error <- (
+          as.numeric(current_state == M_j) +
+            (sr_gamma * successor_matrix[current_state, M_j]) -
+            successor_matrix[previous_state, M_j]
+        )
+        
+        successor_matrix[M_i, M_j] <- successor_matrix[M_i, M_j] + (
+          sr_alpha * prediction_error * eligibility_traces[M_i]
+        )
+      }
+    }
+  }
+  
+  if (rownames_are_strings == FALSE) {
+    out <- successor_matrix %>%
+      as.data.frame() %>%
+      rownames_to_column("from") %>%
+      pivot_longer(cols = -from, names_to = "to", values_to = "sr_value") %>%
+      mutate(across(c(from, to), as.numeric)) %>%
+      mutate(sr_alpha = sr_alpha, sr_gamma = sr_gamma)
+  } else {
+    out <- successor_matrix %>%
+      as.data.frame() %>%
+      rownames_to_column("from") %>%
+      pivot_longer(cols = -from, names_to = "to", values_to = "sr_value") %>%
+      mutate(sr_alpha = sr_alpha, sr_gamma = sr_gamma)
+  }
+  
+  return(out)
+}
+
 
 # Use the analytical method to compute the asymptotic SR
 build_successor_analytically <- function(
-  transition_matrix, lookahead_steps=NA, successor_horizon=NA, normalize=TRUE
+    transition_matrix, lookahead_steps=NA, successor_horizon=NA, normalize=TRUE
 ) {
   if (!is.matrix(transition_matrix)) {
     stop("Transition matrix must be provided.")
@@ -125,75 +203,28 @@ build_successor_analytically <- function(
     sr_matrix <- sr_matrix / lookahead_steps
   }
   
-  return(
-    sr_matrix %>%
-      as.data.frame() %>%
-      mutate(from = row_number()) %>%
-      pivot_longer(
-        cols = -from,
-        names_to = "to"
-      ) %>%
-      mutate(
-        to = str_remove(to, "V"),
-        to = as.numeric(to)
-      ) %>%
-      mutate(gamma = successor_horizon)
-  )
-}
-
-
-#### Build representations ####
-
-build_rep_sr <- function(
-    learning_data, this_alpha, this_gamma, bidirectional = TRUE
-) {
-  
-  these_cols <- colnames(learning_data)
-  
-  if (!any(these_cols == "from") | !any(these_cols == "to")) {
-    stop("Your dataframe does not contain the columns `from` and `to`.")
-  } else if (
-    !is.numeric(learning_data$from) |
-    !is.numeric(learning_data$to)
-  ) {
-    stop("One or both of the columns `from` and `to` contain non-numbers.")
+  if (is.null(rownames(sr_matrix))) {
+    rownames_are_strings <- FALSE
+  } else {
+    rownames_are_strings <- suppressWarnings(
+      all(is.na(as.integer(rownames(sr_matrix))))
+    )
   }
   
-  n_nodes <- with(learning_data, max(from, to))
+  if (rownames_are_strings == FALSE) {
+    out <- sr_matrix %>%
+      as.data.frame() %>%
+      mutate(from = row_number()) %>%
+      pivot_longer(cols = -from, names_to = "to", values_to = "sr_value") %>%
+      mutate(to = str_remove(to, "V"), to = as.integer(to)) %>%
+      mutate(sr_gamma = successor_horizon)
+  } else {
+    out <- sr_matrix %>%
+      as.data.frame() %>%
+      rownames_to_column("from") %>%
+      pivot_longer(cols = -from, names_to = "to", values_to = "sr_value") %>%
+      mutate(sr_gamma = successor_horizon)
+  }
   
-  # sr_rep <- matrix(0, n_nodes, n_nodes) %>%
-  #   build_successor(
-  #     alpha = this_alpha,
-  #     gamma = this_gamma,
-  #     observations = learning_data,
-  #     sr_value_col_name = "sr_value",
-  #     bidirectional = bidirectional
-  #   ) %>%
-  #   # Normalize expected-counts into transition matrix
-  #   mutate(sr_value = sr_value * (1 - this_gamma)) %>%
-  #   select(from, to, sr_value) %>%
-  #   # Make sure datatypes are consistent
-  #   mutate(across(c(from, to), as.integer))
-  
-  # Try initializing the SR matrix w/ flat prior, instead of zeroes
-  # Equal probability of transitioning from X -> X' (but X -> X is impossible)
-  sr_rep <- matrix(1/(n_nodes-1), n_nodes, n_nodes)
-  diag(sr_rep) <- 0
-  
-  sr_rep <- sr_rep %>%
-    build_successor(
-      alpha = this_alpha,
-      gamma = this_gamma,
-      observations = learning_data,
-      sr_value_col_name = "sr_value",
-      bidirectional = bidirectional
-    ) %>%
-    # Normalize expected-counts into transition matrix
-    mutate(sr_value = sr_value * (1 - this_gamma)) %>%
-    select(from, to, sr_value) %>%
-    # Make sure datatypes are consistent
-    mutate(across(c(from, to), as.integer))
-  
-  return ( sr_rep )
+  return(out)
 }
-
