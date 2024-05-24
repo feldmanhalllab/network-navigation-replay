@@ -589,7 +589,7 @@ if (knitting) {
       )
     )
   
-  sim_behav_bfs_forward %>%
+  sim_behav_bfs_forward_with_lapse %>%
     write_csv(
       here(
         "data", "simulated-model-behaviors",
