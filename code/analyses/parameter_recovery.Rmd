@@ -1,0 +1,644 @@
+---
+title: "Parameter recovery"
+output:
+  html_document:
+    code_download: true
+    code_folding: hide
+    toc: true
+    toc_float:
+      collapsed: true
+---
+
+# Setup
+
+```{r libraries}
+library(tidyverse)
+library(here)
+library(broom)
+library(patchwork)
+
+source(here("code", "utils", "ggplot_themes.R"))
+source(here("code", "utils", "kable_utils.R"))
+
+knitting <- knitr::is_html_output()
+
+create_path <- function(this_path) {
+  if (!dir.exists(this_path)) {
+    dir.create(this_path, recursive = TRUE)
+  }
+}
+
+if (knitting) {
+  here("outputs", "param-recovery") %>%
+    create_path()
+}
+```
+
+
+# Models with a lapse rate
+
+In the previous iteration of this work, we had estimated models containing lapse rate parameters. The rationale was that there might be some amount of irreducible decision noise in subjects' behaviors (e.g., occasional lapses in attention, resulting in random responses). However, it's entirely possible that the lapse rate cannot be reliably estimated given our data, and if this is true, trying to estimate a lapse rate could end up introducing other kinds of biases in our parameter estimation.
+
+```{r load-lapse-params-true}
+lapse_params_true <- here("data", "simulated-model-behaviors") %>%
+  fs::dir_ls(regexp = "with_lapse\\.csv") %>%
+  map_dfr(.f = ~read_csv(.x, show_col_types = FALSE), .id = "filename") %>%
+  mutate(
+    model = str_extract(filename, "bfs_(backward|forward)|ideal_obs|sr")
+  ) %>%
+  select(
+    model, sub_id, lapse_rate, search_threshold, softmax_temperature, sr_gamma
+  ) %>%
+  distinct() %>%
+  pivot_longer(
+    -c(model, sub_id), names_to = "param_name", values_to = "param_value"
+  ) %>%
+  drop_na()
+```
+
+### SR with lapse rate
+
+Starting with the SR, we can see that recovery of the SR gamma parameter is pretty dismal.
+
+```{r recovery-lapse-sr-gamma}
+lapse_params_est_sr <- here("data", "param-recovery", "sr-with-lapse") %>%
+  fs::dir_ls(glob = "*.csv") %>%
+  map_dfr(.f = ~read_csv(.x, show_col_types = FALSE), .id = "filename") %>%
+  mutate(
+    sub_id = str_extract(filename, "sub_[[:digit:]]+"),
+    sub_id = str_remove(sub_id, "sub_"),
+    sub_id = as.numeric(sub_id)
+  ) %>%
+  select(sub_id, everything(), -filename) %>%
+  rename(neg_loglik = optim_value) %>%
+  # Find best-fitting optimization run
+  filter(convergence == "converged") %>%
+  group_by(sub_id) %>%
+  slice_min(neg_loglik, n = 1) %>%
+  ungroup() %>%
+  # Some subjects may have had multiple "best" optimization runs
+  # In that case, just go with whichever "best" run was estimated first
+  group_by(sub_id) %>%
+  slice_min(optimizer_run, n = 1) %>%
+  ungroup()
+
+recovery_lapse_sr <- lapse_params_true %>%
+  filter(model == "sr") %>%
+  pivot_wider(
+    names_from = param_name,
+    values_from = param_value,
+    names_prefix = "true_"
+  ) %>%
+  left_join(
+    lapse_params_est_sr %>%
+      select(sub_id, param_name, param_value = param_value_human_readable) %>%
+      pivot_wider(
+        names_from = param_name,
+        values_from = param_value,
+        names_prefix = "est_"
+      ),
+    by = join_by(sub_id)
+  )
+
+plot_recovery_sr_lapse_gamma <- recovery_lapse_sr %>%
+  ggplot(aes(x=true_sr_gamma, y=est_sr_gamma)) +
+  theme_custom() +
+  geom_abline(slope = 1, intercept = 0, linetype = "dashed", color = "blue") +
+  geom_point(alpha = 0.25) +
+  xlab("True SR gamma") +
+  ylab("Estimated SR gamma") +
+  ggtitle("Parameter recovery: SR w/ lapse rate")
+
+plot_recovery_sr_lapse_gamma
+
+recovery_lapse_sr %>%
+  with(cor.test(true_sr_gamma, est_sr_gamma, method = "spearman")) %>%
+  tidy() %>%
+  kable_custom("Parameter recovery: SR w/ lapse rate")
+```
+
+The recovery of the softmax temperature parameter is also fairly bad. We note that some of the softmax temperatures are estimated to be, on an absolute scale, very large.
+
+```{r recovery-lapse-sr-softmax}
+recovery_lapse_sr %>%
+  ggplot(aes(x=true_softmax_temperature, y=est_softmax_temperature)) +
+  theme_custom() +
+  geom_abline(slope = 1, intercept = 0, linetype = "dashed", color = "blue") +
+  geom_point(alpha = 0.25) +
+  xlab("True softmax temperature") +
+  ylab("Estimated softmax temperature") +
+  ggtitle("Parameter recovery: SR w/ lapse rate")
+
+recovery_lapse_sr %>%
+  ggplot(aes(x=true_softmax_temperature, y=est_softmax_temperature)) +
+  theme_custom() +
+  geom_abline(slope = 1, intercept = 0, linetype = "dashed", color = "blue") +
+  geom_point(alpha = 0.25) +
+  xlab("True softmax temperature") +
+  ylab("Estimated softmax temperature") +
+  coord_cartesian(ylim = c(-50000, 50000)) +
+  ggtitle("Parameter recovery: SR w/ lapse rate")
+
+plot_recovery_sr_lapse_softmax <- recovery_lapse_sr %>%
+  ggplot(aes(x=true_softmax_temperature, y=est_softmax_temperature)) +
+  theme_custom() +
+  geom_abline(slope = 1, intercept = 0, linetype = "dashed", color = "blue") +
+  geom_point(alpha = 0.25) +
+  xlab("True softmax temperature") +
+  ylab("Estimated softmax temperature") +
+  coord_cartesian(ylim = c(-5000, 5000)) +
+  ggtitle("Parameter recovery: SR w/ lapse rate")
+
+plot_recovery_sr_lapse_softmax
+
+recovery_lapse_sr %>%
+  with(
+    cor.test(
+      true_softmax_temperature, est_softmax_temperature,
+      method = "spearman"
+    )
+  ) %>%
+  tidy() %>%
+  kable_custom("Parameter recovery: SR w/ lapse rate")
+```
+
+And to round everything out, we can see that we're unable to reliably recover the lapse rate.
+
+```{r recovery-lapse-sr-lapse}
+plot_recovery_sr_lapse_lapse <- recovery_lapse_sr %>%
+  ggplot(aes(x=true_lapse_rate, y=est_lapse_rate)) +
+  theme_custom() +
+  geom_abline(slope = 1, intercept = 0, linetype = "dashed", color = "blue") +
+  geom_point(alpha = 0.25) +
+  xlab("True lapse rate") +
+  ylab("Estimated lapse rate") +
+  ggtitle("Parameter recovery: SR w/ lapse rate")
+
+plot_recovery_sr_lapse_lapse
+
+recovery_lapse_sr %>%
+  with(cor.test(true_lapse_rate, est_lapse_rate, method = "spearman")) %>%
+  tidy() %>%
+  kable_custom("Parameter recovery: SR w/ lapse rate")
+```
+
+Let's create a visualization combining these plots:
+
+```{r plot-recovery-lapse-sr}
+#| fig.width=8, fig.height=4
+
+plot_recovery_sr_lapse_combined <- wrap_plots(
+  plot_recovery_sr_lapse_gamma + ggtitle("Gamma"),
+  plot_recovery_sr_lapse_softmax + ggtitle("Softmax temperature"),
+  plot_recovery_sr_lapse_lapse + ggtitle("Lapse rate")
+) +
+  plot_annotation(
+    title = "Parameter recovery: Successor Representation with lapse rate",
+    theme = theme(plot.title = element_text(hjust = 0.5)),
+    tag_levels = "A",
+    tag_suffix = "."
+  ) &
+  xlab("True parameter value") &
+  ylab("Estimated parameter value")
+
+plot_recovery_sr_lapse_combined
+
+if (knitting) {
+  ggsave(
+    filename = here("outputs", "param-recovery", "param_recovery_sr_lapse.pdf"),
+    plot = plot_recovery_sr_lapse_combined,
+    width = 8, height = 4,
+    units = "in", dpi = 300
+  )
+}
+```
+
+## BFS-forward
+
+We had previously also estimated a model of (forward)-BFS with a lapse rate. Here, we'll test the recoverability of this model.
+
+Results indicate recovery of the search threshold parameter is mediocre.
+
+```{r recovery-lapse-bfs-forward-search-threshold}
+lapse_params_est_bfs_forward <- here(
+  "data", "param-recovery", "bfs-forward-with-lapse"
+) %>%
+  fs::dir_ls(glob = "*.csv") %>%
+  map_dfr(.f = ~read_csv(.x, show_col_types = FALSE), .id = "filename") %>%
+  mutate(
+    sub_id = str_extract(filename, "sub_[[:digit:]]+"),
+    sub_id = str_remove(sub_id, "sub_"),
+    sub_id = as.numeric(sub_id)
+  ) %>%
+  select(sub_id, everything(), -filename) %>%
+  rename(neg_loglik = optim_value) %>%
+  # Find best-fitting optimization run
+  filter(convergence == "converged") %>%
+  group_by(sub_id) %>%
+  slice_min(neg_loglik, n = 1) %>%
+  ungroup() %>%
+  # Some subjects may have had multiple "best" optimization runs
+  # In that case, just go with whichever "best" run was estimated first
+  group_by(sub_id) %>%
+  slice_min(optimizer_run, n = 1) %>%
+  ungroup()
+
+recovery_lapse_bfs_forward <- lapse_params_true %>%
+  filter(model == "bfs_forward") %>%
+  pivot_wider(
+    names_from = param_name,
+    values_from = param_value,
+    names_prefix = "true_"
+  ) %>%
+  left_join(
+    lapse_params_est_bfs_forward %>%
+      select(sub_id, param_name, param_value = param_value_human_readable) %>%
+      pivot_wider(
+        names_from = param_name,
+        values_from = param_value,
+        names_prefix = "est_"
+      ),
+    by = join_by(sub_id)
+  )
+
+plot_recovery_bfs_forward_lapse_threshold <- recovery_lapse_bfs_forward %>%
+  ggplot(aes(x=true_search_threshold, y=est_search_threshold)) +
+  theme_custom() +
+  geom_abline(slope = 1, intercept = 0, linetype = "dashed", color = "blue") +
+  geom_point(alpha = 0.25) +
+  xlab("True search threshold") +
+  ylab("Estimated search threshold") +
+  ggtitle("Parameter recovery: BFS-forward w/ lapse rate")
+
+plot_recovery_bfs_forward_lapse_threshold
+
+recovery_lapse_bfs_forward %>%
+  with(
+    cor.test(true_search_threshold, est_search_threshold, method = "spearman")
+  ) %>%
+  tidy() %>%
+  kable_custom("Parameter recovery: BFS-forward w/ lapse rate")
+```
+
+The recovery of the lapse rate is also mediocre.
+
+```{r recovery-lapse-bfs-forward-lapse-rate}
+plot_recovery_bfs_forward_lapse_lapse <- recovery_lapse_bfs_forward %>%
+  ggplot(aes(x=true_lapse_rate, y=est_lapse_rate)) +
+  theme_custom() +
+  geom_abline(slope = 1, intercept = 0, linetype = "dashed", color = "blue") +
+  geom_point(alpha = 0.25) +
+  xlab("True lapse") +
+  ylab("Estimated lapse rate") +
+  ggtitle("Parameter recovery: BFS-forward w/ lapse rate")
+
+plot_recovery_bfs_forward_lapse_lapse
+
+recovery_lapse_bfs_forward %>%
+  with(cor.test(true_lapse_rate, est_lapse_rate, method = "spearman")) %>%
+  tidy() %>%
+  kable_custom("Parameter recovery: BFS-forward w/ lapse rate")
+```
+
+Plotting them together...
+
+```{r plot-recovery-lapse-bfs-forward}
+#| fig.width=8, fig.height=4
+
+plot_recovery_bfs_forward_lapse_combined <- wrap_plots(
+  plot_recovery_bfs_forward_lapse_threshold + ggtitle("Search threshold"),
+  plot_recovery_bfs_forward_lapse_lapse + ggtitle("Lapse rate")
+) +
+  plot_annotation(
+    title = "Parameter recovery: BFS-forward",
+    theme = theme(plot.title = element_text(hjust = 0.5)),
+    tag_levels = "A",
+    tag_suffix = "."
+  ) &
+  xlab("True parameter value") &
+  ylab("Estimated parameter value")
+
+plot_recovery_bfs_forward_lapse_combined
+
+if (knitting) {
+  ggsave(
+    filename = here(
+      "outputs", "param-recovery", "param_recovery_bfs_forward_lapse.pdf"
+    ),
+    plot = plot_recovery_bfs_forward_lapse_combined,
+    width = 8, height = 4,
+    units = "in", dpi = 300
+  )
+}
+```
+
+
+# Models without a lapse rate
+
+Since it appears that lapse rates cannot be reliably recovered, we'll now try looking at models that don't contain a lapse rate. Note that these include new models that we've added in the revision.
+
+```{r load-params-no-lapse}
+params_true <- here("data", "simulated-model-behaviors") %>%
+  fs::dir_ls(regexp = "no_lapse\\.csv") %>%
+  map_dfr(.f = ~read_csv(.x, show_col_types = FALSE), .id = "filename") %>%
+  mutate(
+    model = str_extract(filename, "bfs_(backward|forward)|ideal_obs|sr")
+  ) %>%
+  select(model, sub_id, search_threshold, softmax_temperature, sr_gamma) %>%
+  distinct() %>%
+  pivot_longer(
+    -c(model, sub_id), names_to = "param_name", values_to = "param_value"
+  ) %>%
+  drop_na()
+
+params_est <- here("data", "param-recovery") %>%
+  fs::dir_ls(
+    regexp = "(bfs-(backward|forward)|ideal-obs|sr)-no-lapse(.)+\\.csv",
+    recurse = 1
+  ) %>%
+  map_dfr(.f = ~read_csv(.x, show_col_types = FALSE), .id = "filename") %>%
+  mutate(
+    sub_id = str_extract(filename, "sub_[[:digit:]]+"),
+    sub_id = str_remove(sub_id, "sub_"),
+    sub_id = as.numeric(sub_id),
+    model = str_extract(filename, "bfs_(backward|forward)|ideal_obs|sr")
+  ) %>%
+  select(sub_id, everything(), -filename) %>%
+  rename(neg_loglik = optim_value) %>%
+  # Find best-fitting optimization run
+  filter(convergence == "converged") %>%
+  group_by(sub_id, model) %>%
+  slice_min(neg_loglik, n = 1) %>%
+  ungroup() %>%
+  # Some subjects may have had multiple "best" optimization runs
+  # In that case, just go with whichever "best" run was estimated first
+  group_by(sub_id, model) %>%
+  slice_min(optimizer_run, n = 1) %>%
+  ungroup() %>%
+  # Clean up
+  mutate(
+    param_value_to_keep = if_else(
+      is.na(param_value), param_value_human_readable, param_value
+    )
+  ) %>%
+  select(
+    model, sub_id, param_name, param_value = param_value_to_keep, neg_loglik
+  ) %>%
+  arrange(model, sub_id, param_name)
+```
+
+## BFS-backward
+
+Recovery is generally very good. We note that the optimizer tends to converge upon two (inaccurate) modes when the true search threshold is greater than 10. We know that behavior basically asymptotes around then, so estimated thresholds greater than 10 should probably be treated as being indistinguishable from asymptotic.
+
+```{r recovery-bfs-backward}
+recovery_bfs_backward <- params_true %>%
+  filter(model == "bfs_backward") %>%
+  pivot_wider(
+    names_from = param_name,
+    values_from = param_value,
+    names_prefix = "true_"
+  ) %>%
+  left_join(
+    params_est %>%
+      filter(model == "bfs_backward") %>%
+      select(sub_id, param_name, param_value) %>%
+      pivot_wider(
+        names_from = param_name,
+        values_from = param_value,
+        names_prefix = "est_"
+      ),
+    by = join_by(sub_id)
+  )
+
+plot_recovery_bfs_backward <- recovery_bfs_backward %>%
+  ggplot(aes(x=true_search_threshold, y=est_search_threshold)) +
+  theme_custom() +
+  geom_abline(slope = 1, intercept = 0, linetype = "dashed", color = "blue") +
+  geom_point(alpha = 0.25) +
+  xlab("True search threshold") +
+  ylab("Estimated search threshold") +
+  ggtitle("Parameter recovery: BFS-backward")
+
+plot_recovery_bfs_backward
+
+recovery_bfs_backward %>%
+  with(
+    cor.test(true_search_threshold, est_search_threshold, method = "spearman")
+  ) %>%
+  tidy() %>%
+  kable_custom("Parameter recovery: BFS-backward")
+```
+
+## BFS-forward
+
+Recovery is similarly good for the BFS-forward model, though we note that the optimizer sometimes overestimates large thresholds (starting at around 12) and underestimates small thresholds (ending at around 4).
+
+```{r recovery-bfs-forward}
+recovery_bfs_forward <- params_true %>%
+  filter(model == "bfs_forward") %>%
+  pivot_wider(
+    names_from = param_name,
+    values_from = param_value,
+    names_prefix = "true_"
+  ) %>%
+  left_join(
+    params_est %>%
+      filter(model == "bfs_forward") %>%
+      select(sub_id, param_name, param_value) %>%
+      pivot_wider(
+        names_from = param_name,
+        values_from = param_value,
+        names_prefix = "est_"
+      ),
+    by = join_by(sub_id)
+  )
+
+plot_recovery_bfs_forward <- recovery_bfs_forward %>%
+  ggplot(aes(x=true_search_threshold, y=est_search_threshold)) +
+  theme_custom() +
+  geom_abline(slope = 1, intercept = 0, linetype = "dashed", color = "blue") +
+  geom_point(alpha = 0.25) +
+  xlab("True search threshold") +
+  ylab("Estimated search threshold") +
+  ggtitle("Parameter recovery: BFS-forward")
+
+plot_recovery_bfs_forward
+
+recovery_bfs_forward %>%
+  with(
+    cor.test(true_search_threshold, est_search_threshold, method = "spearman")
+  ) %>%
+  tidy() %>%
+  kable_custom("Parameter recovery: BFS-forward")
+```
+
+## Ideal observer
+
+Parameter recovery for the ideal observer model is clearly biased, such that the optimizer is best at recovering (inverse) temperatures in the range of [-1, 0], less good at recovering temperatures in the range of [-2, -1], and much worse beyond that. It may be wise to interpret estimated temperatures beyond -2 as being "very consistent" with an ideal observer model.
+
+```{r recovery-ideal-obs}
+recovery_ideal_obs <- params_true %>%
+  filter(model == "ideal_obs") %>%
+  pivot_wider(
+    names_from = param_name,
+    values_from = param_value,
+    names_prefix = "true_"
+  ) %>%
+  left_join(
+    params_est %>%
+      filter(model == "ideal_obs") %>%
+      select(sub_id, param_name, param_value) %>%
+      pivot_wider(
+        names_from = param_name,
+        values_from = param_value,
+        names_prefix = "est_"
+      ),
+    by = join_by(sub_id)
+  )
+
+plot_recovery_ideal_obs <- recovery_ideal_obs %>%
+  ggplot(aes(x=true_softmax_temperature, y=est_softmax_temperature)) +
+  theme_custom() +
+  geom_abline(slope = 1, intercept = 0, linetype = "dashed", color = "blue") +
+  geom_point(alpha = 0.25) +
+  xlab("True softmax temperature") +
+  ylab("Estimated softmax temperature") +
+  ggtitle("Parameter recovery: Ideal observer")
+
+plot_recovery_ideal_obs
+
+recovery_ideal_obs %>%
+  with(
+    cor.test(
+      true_softmax_temperature, est_softmax_temperature,
+      method = "spearman"
+    )
+  ) %>%
+  tidy() %>%
+  kable_custom("Parameter recovery: Ideal observer")
+```
+
+## Successor Representation
+
+We find that the SR gamma parameter has acceptable recoverability, though we also note that smaller values of gamma appear to be a little less reliably recovered: true gammas below 0.25 can be underestimated as near-zero.
+
+```{r recovery-sr-gamma}
+recovery_sr <- params_true %>%
+  filter(model == "sr") %>%
+  pivot_wider(
+    names_from = param_name,
+    values_from = param_value,
+    names_prefix = "true_"
+  ) %>%
+  left_join(
+    params_est %>%
+      filter(model == "sr") %>%
+      select(sub_id, param_name, param_value) %>%
+      pivot_wider(
+        names_from = param_name,
+        values_from = param_value,
+        names_prefix = "est_"
+      ),
+    by = join_by(sub_id)
+  )
+
+plot_recovery_sr_gamma <- recovery_sr %>%
+  ggplot(aes(x=true_sr_gamma, y=est_sr_gamma)) +
+  theme_custom() +
+  geom_abline(slope = 1, intercept = 0, linetype = "dashed", color = "blue") +
+  geom_point(alpha = 0.25) +
+  xlab("True gamma") +
+  ylab("Estimated gamma") +
+  ggtitle("Parameter recovery: Successor Rep.")
+
+plot_recovery_sr_gamma
+
+recovery_sr %>%
+  with(cor.test(true_sr_gamma, est_sr_gamma, method = "spearman")) %>%
+  tidy() %>%
+  kable_custom("Parameter recovery: Successor Rep.")
+```
+
+Recovery of the softmax temperature parameter is less good. We can see that the optimizer, on occasion, estimates extremely large values of this parameter. Below, we plot all of the data in the first graph, then zoom in to see more typical values in the second graph. The third graph zooms in a bit more to emphasize that past true softmax temperatures of about 250, the optimizer often finds a solution at around 4000. Thankfully, the softmax temperature is not a parameter we're deeply interested in interpreting, so as long as it doesn't interfere with recovery of gamma (which it appears not to), it suffices that large (inverse) temperatures reflect "strong weighting."
+
+```{r recovery-sr-softmax-temperature}
+recovery_sr %>%
+  ggplot(aes(x=true_softmax_temperature, y=est_softmax_temperature)) +
+  theme_custom() +
+  geom_abline(slope = 1, intercept = 0, linetype = "dashed", color = "blue") +
+  geom_point(alpha = 0.25) +
+  xlab("True softmax temperature") +
+  ylab("Estimated softmax temperature") +
+  ggtitle("Parameter recovery: Successor Rep.")
+
+recovery_sr %>%
+  ggplot(aes(x=true_softmax_temperature, y=est_softmax_temperature)) +
+  theme_custom() +
+  geom_abline(slope = 1, intercept = 0, linetype = "dashed", color = "blue") +
+  geom_point(alpha = 0.25) +
+  xlab("True softmax temperature") +
+  ylab("Estimated softmax temperature") +
+  ggtitle("Parameter recovery: Successor Rep.") +
+  coord_cartesian(ylim = c(-100, 20000))
+
+plot_recovery_sr_softmax <- recovery_sr %>%
+  ggplot(aes(x=true_softmax_temperature, y=est_softmax_temperature)) +
+  theme_custom() +
+  geom_abline(slope = 1, intercept = 0, linetype = "dashed", color = "blue") +
+  geom_point(alpha = 0.25) +
+  xlab("True softmax temperature") +
+  ylab("Estimated softmax temperature") +
+  ggtitle("Parameter recovery: Successor Rep.") +
+  coord_cartesian(ylim = c(-100, 5000))
+
+plot_recovery_sr_softmax
+
+recovery_sr %>%
+  with(
+    cor.test(
+      true_softmax_temperature, est_softmax_temperature,
+      method = "spearman"
+    )
+  ) %>%
+  tidy() %>%
+  kable_custom("Parameter recovery: Successor Rep.")
+```
+
+## Plot for manuscript
+
+We'll now combine all of these parameter recovery plots...
+
+```{r plot-recovery-combined}
+#| fig.width=8, fig.height=6
+
+plot_recovery_combined <- (
+  (plot_recovery_bfs_backward + ggtitle("BFS-backward")) +
+    (plot_recovery_bfs_forward + ggtitle("BFS-forward")) +
+    (plot_recovery_ideal_obs + ggtitle("Ideal observer"))
+) /
+  (
+    (plot_recovery_sr_gamma + ggtitle("Successor Representation gamma")) +
+      (plot_recovery_sr_softmax + ggtitle("Successor Representation softmax"))
+  ) +
+  plot_annotation(
+    title = "Parameter recovery",
+    theme = theme(plot.title = element_text(hjust = 0.5)),
+    tag_levels = "A",
+    tag_suffix = "."
+  )
+
+plot_recovery_combined
+
+if (knitting) {
+  ggsave(
+    filename = here(
+      "outputs", "param-recovery", "param_recovery_combined.pdf"
+    ),
+    plot = plot_recovery_combined,
+    width = 8, height = 6,
+    units = "in", dpi = 300
+  )
+}
+```
+
