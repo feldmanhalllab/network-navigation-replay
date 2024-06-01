@@ -1,0 +1,562 @@
+---
+title: "Clean social navigation/replay data"
+output:
+  html_document:
+    code_download: true
+    code_folding: hide
+    toc: true
+    toc_float:
+      collapsed: true
+---
+
+# Setup
+
+Loading in our usual libraries...
+
+```{r setup}
+library(tidyverse)
+library(here)
+library(tidygraph)
+library(ggraph)
+```
+
+If we convert the node labels into the right numeric IDs, we can capitalize upon materials created for other experiments in the lab, which have used the same underlying artificial network.
+
+```{r node-label-crosswalk}
+node_crosswalk <- tribble(
+  ~node_label, ~node_id,
+  "B", 1,
+  "L0", 2,
+  "L1a", 3,
+  "L1b", 4,
+  "L2a", 5,
+  "L2b", 6,
+  "L3a", 7,
+  "R0", 8,
+  "R1a", 9,
+  "R1b", 10,
+  "R2a", 11,
+  "R2b", 12,
+  "R3a", 13
+) %>% mutate(node_id = as.character(node_id))
+```
+
+
+# Load source data
+
+Note: Despite what the variable names imply, these data are not the fully raw data, but come very close.
+
+Some of the raw data inadvertantly included information like IP addresses that could be considered sensitive and unsuitable for public sharing; the data in this repository have removed such information so that responses are fully anonymized. There were also a small number of subjects who had been noted as being noncompliant during the study session; their data were never analyzed, and additional subjects were recruited in their place to meet the target N. Those data are not included in the "source" datafiles here.
+
+```{r load-data}
+raw_study1 <- here("data", "source-data", "social_navigation_study1.csv") %>%
+  read_csv(show_col_types = FALSE)
+
+raw_study2 <- here("data", "source-data", "social_navigation_study2.csv") %>%
+  read_csv(show_col_types = FALSE)
+
+# `readr::read_csv` throws a warning about parsing issues, and indeed the
+# resulting tibble appears to contain problems...
+# 
+# raw_study3 <- here("data", "source-data", "social_navigation_study3.csv") %>%
+#   read_csv(show_col_types = FALSE)
+
+raw_study3 <- here("data", "source-data", "social_navigation_study3.csv") %>%
+  read.csv() %>%
+  as_tibble()
+```
+
+
+# Stimulus mappings
+
+We might want to know what 
+
+```{r clean-stim-mappings}
+clean_stim_mappings <- function(df) {
+  df_of_names <- df %>%
+    filter(!is.na(mapping_name)) %>%
+    select(sub_id, mapping_name) %>%
+    separate_longer_delim(mapping_name, ",") %>%
+    group_by(sub_id) %>%
+    mutate(node_name = lead(mapping_name)) %>%
+    ungroup() %>%
+    left_join(node_crosswalk, by = join_by(mapping_name == node_label)) %>%
+    drop_na() %>%
+    select(sub_id, node_id, node_name)
+  
+  df %>%
+    filter(!is.na(mapping_img)) %>%
+    select(sub_id, mapping_img) %>%
+    mutate(
+      mapping_img = str_remove_all(mapping_img, "img/"),
+      # Raw column has the following structure:
+      # node_A_id, node_A_stimfile, node_B_id, node_B_stimfile
+      # Need to separate these out, but can't use commas as delim
+      # Solution: use a little trick so that we can get unique delim
+      mapping_img = str_replace_all(mapping_img, "\\.jpg,", "_"),
+      mapping_img = str_remove(mapping_img, "\\.jpg")
+    ) %>%
+    separate_longer_delim(mapping_img, "_") %>%
+    separate_wider_delim(
+      mapping_img, ",", names = c("node_label", "node_stim")
+    ) %>%
+    left_join(node_crosswalk, by = join_by(node_label)) %>%
+    mutate(
+      node_race = str_sub(node_stim, 5, 5),
+      node_gender = str_sub(node_stim, 6, 6),
+      node_race = case_when(
+        node_race == "A" ~ "asian",
+        node_race == "B" ~ "black",
+        node_race == "L" ~ "latine",
+        node_race == "W" ~ "white"
+      ),
+      node_gender = if_else(node_gender == "F", "female", "male")
+    ) %>%
+    left_join(df_of_names, by = join_by(sub_id, node_id)) %>%
+    select(sub_id, node_id, node_name, node_race, node_gender, node_stim) %>%
+    mutate(node_id = as.numeric(node_id)) %>%
+    arrange(sub_id, node_id)
+}
+
+nodes_study1 <- raw_study1 %>%
+  clean_stim_mappings()
+
+nodes_study2 <- raw_study2 %>%
+  clean_stim_mappings()
+
+nodes_study3 <- raw_study3 %>%
+  clean_stim_mappings()
+```
+
+
+# Learning data
+
+The cleaning procedure is exactly the same for all studies.
+
+```{r clean-learning-data}
+clean_learning <- function(df) {
+  df %>%
+    # Keep relevant data only
+    filter(trial_purpose == "memorygame_round") %>%
+    select(
+      sub_id, trial_index,
+      target_id = pivot_id,
+      target_friends = pivot_friends,
+      guess_id = choice_seq
+    ) %>%
+    # Renumber trials
+    group_by(sub_id) %>%
+    mutate(trial = row_number()) %>%
+    ungroup() %>%
+    # On each trial, enumerate each guess made by the subject
+    separate_rows(guess_id, sep = ",") %>%
+    group_by(sub_id, trial) %>%
+    mutate(guess_number = row_number()) %>%
+    ungroup() %>%
+    # Mark correct guesses
+    mutate(guess_correct = str_detect(target_friends, guess_id)) %>%
+    # Convert node labels into numeric IDs
+    left_join(node_crosswalk, by = c("target_id" = "node_label")) %>%
+    left_join(node_crosswalk, by = c("guess_id" = "node_label")) %>%
+    type_convert(col_types = cols()) %>%
+    # Make pretty
+    arrange(sub_id, trial, guess_number) %>%
+    select(
+      sub_id, trial,
+      target_id = node_id.x,
+      guess_id = node_id.y,
+      guess_number, guess_correct
+    )
+}
+
+learn_study1 <- raw_study1 %>%
+  clean_learning()
+
+learn_study2 <- raw_study2 %>%
+  clean_learning()
+
+learn_study3 <- raw_study3 %>%
+  clean_learning()
+```
+
+
+# Network data
+
+All studies use exactly the same network. On day 2, both studies have a transition re-evaluation task where two network members are suddenly no longer friends, and two other network members suddenly become friends.
+
+```{r clean-network-data}
+nodelist <- learn_study1 %>%
+  filter(guess_correct) %>%
+  select(target_id, guess_id) %>%
+  distinct() %>%
+  pivot_longer(everything()) %>%
+  select(node_id = value) %>%
+  distinct() %>%
+  arrange(node_id) %>%
+  deframe()
+
+edgelist <- learn_study1 %>%
+  filter(guess_correct) %>%
+  select(target_id, guess_id) %>%
+  distinct() %>%
+  rename(from = target_id, to = guess_id) %>%
+  arrange(from, to)
+
+adjlist <- expand_grid(from = nodelist, to = nodelist) %>%
+  left_join(edgelist %>% mutate(edge = 1), by = c("from", "to")) %>%
+  mutate(edge = if_else(is.na(edge), 0, edge))
+
+adjlist_reevaluation <- adjlist %>%
+  mutate(
+    edge = case_when(
+      # B and L0 no longer friends
+      from == 1 & to == 2 ~ 0,
+      from == 2 & to == 1 ~ 0,
+      # R3a and L3a now friends
+      from == 7 & to == 13 ~ 1,
+      from == 13 & to == 7 ~ 1,
+      TRUE ~ edge
+    )
+  )
+```
+
+We can first see what the original network looks like...
+
+```{r plot-network}
+adjlist %>%
+  filter(edge == 1, from < to) %>%
+  select(from, to) %>%
+  tbl_graph(edges = ., directed = FALSE) %>%
+  mutate(name = row_number()) %>%
+  ggraph(layout = "stress") +
+  theme_graph() +
+  geom_edge_link() +
+  geom_node_label(aes(label = name))
+```
+
+Then we'll look at what happens once the friendships shift. The community structure remains largely the same, but node 1 is no longer the "broker" figure connecting them; instead, nodes 7 and 13 (who were formerly on the "fringe" of the network) become important brokers.
+
+```{r plot-morphed-network}
+adjlist_reevaluation %>%
+  filter(edge == 1, from < to) %>%
+  select(from, to) %>%
+  tbl_graph(edges = ., directed = FALSE) %>%
+  mutate(name = row_number()) %>%
+  ggraph(layout = "stress") +
+  theme_graph() +
+  geom_edge_link() +
+  geom_node_label(aes(label = name))
+```
+
+
+# Memory data
+
+## Sequences of guesses
+
+In the memory task, participants sequentially guessed which network members were friends with each other. Therefore, from the participants' point of view, this task was functionally identical to the learning task, except all cards were face-up, and no feedback was provided.
+
+```{r clean-memory-seq}
+clean_memory_sequences <- function(df) {
+  df %>%
+    # Keep relevant data only
+    filter(trial_purpose == "memory_quiz") %>%
+    select(
+      measurement_id, sub_id, trial_index,
+      target_id = pivot_id,
+      responses, rt
+    ) %>%
+    # Renumber trials
+    group_by(sub_id, measurement_id) %>%
+    mutate(trial = row_number()) %>%
+    ungroup() %>%
+    # Descend into regex hell
+    mutate(
+      guess_id = str_extract(responses, "\\[.+\\]"),
+      guess_id = str_remove_all(guess_id, "\\[|\\]|\"")
+    ) %>%
+    # On each trial, enumerate each guess made by the subject
+    separate_rows(guess_id, sep = ",") %>%
+    group_by(sub_id, measurement_id, trial) %>%
+    mutate(guess_number = row_number()) %>%
+    ungroup() %>%
+    # Convert node labels into numeric IDs
+    left_join(node_crosswalk, by = c("target_id" = "node_label")) %>%
+    left_join(node_crosswalk, by = c("guess_id" = "node_label")) %>%
+    type_convert(col_types = cols()) %>%
+    # Make pretty
+    arrange(measurement_id, sub_id, trial, guess_number) %>%
+    select(
+      measurement_id, sub_id, trial,
+      target_id = node_id.x,
+      guess_id = node_id.y,
+      guess_number
+    ) %>%
+    # Mark correct guesses
+    left_join(adjlist, by = c("target_id" = "from", "guess_id" = "to")) %>%
+    rename(guess_correct = edge)
+}
+
+mem_seq_study1 <- raw_study1 %>%
+  mutate(measurement_id = 1) %>%
+  clean_memory_sequences()
+
+mem_seq_study2 <- raw_study2 %>%
+  mutate(measurement_id = session) %>%
+  clean_memory_sequences()
+
+mem_seq_study3 <- raw_study3 %>%
+  mutate(
+    measurement_id = case_when(
+      session == 1 & trial_index < 512 ~ 1,
+      session == 1 ~ 2,
+      session == 2 ~ 3,
+    )
+  ) %>%
+  clean_memory_sequences()
+```
+
+## Traditional memory format
+
+We can convert these sequences into a more "traditional" format for memory tasks. Basically, we can pretend that on each trial, participants were presented with a single pair of network members, and asked to indicate whether they were friends. Once in this format, it becomes really easy to convert responses into a matrix.
+
+```{r clean-memory-all}
+clean_memory_traditional <- function(df) {
+  expand_grid(
+    df %>% select(measurement_id, sub_id) %>% distinct(),
+    from = nodelist, to = nodelist
+  ) %>%
+    left_join(
+      df %>%
+        select(measurement_id, sub_id, from = target_id, to = guess_id) %>%
+        mutate(choice = 1),
+      by = c("measurement_id", "sub_id", "from", "to")
+    ) %>%
+    mutate(choice = if_else(is.na(choice), 0, choice)) %>%
+    left_join(adjlist, by = c("from", "to")) %>%
+    mutate(correct = choice == edge)
+}
+
+mem_all_study1 <- mem_seq_study1 %>%
+  clean_memory_traditional()
+
+mem_all_study2 <- mem_seq_study2 %>%
+  clean_memory_traditional()
+
+mem_all_study3 <- mem_seq_study3 %>%
+  clean_memory_traditional()
+```
+
+
+# Message-passing task
+
+In the message-passing task, participants learned that (e.g.) Abby wanted to send a message to Zoey. Given this goal, participants must decide whether to give the message to Farah or Sarah.
+
+```{r clean-message-passing}
+clean_mpt <- function(df) {
+  df %>%
+    # Keep relevant data only
+    filter(trial_purpose == "test_resp") %>%
+    # Note from JYS on May 16, 2023
+    # The column `short_dist` is misleadingly named. Consider the set of trials
+    # where startpoint==12 and endpoint==8. Node 12 can pass the message to any of
+    # their friends: 10, 11, or 13. Let's call this 12-->8 set of trials a
+    # testbed. For this testbed, the shortest possible distance, when considering
+    # ALL of the options, is 2. This is the quantity encoded by `short_dist`.
+    # Despite its name, it does NOT imply anything about the shortest path
+    # distance GIVEN a set of options. For example, on the trial where subjects
+    # must choose between options 11 and 13, the shortest distance GIVEN these
+    # options is 3, NOT 2.
+    select(
+      measurement_id, sub_id, trial_index, network,
+      rt, key_press, display_left,
+      startpoint_id, endpoint_id,
+      opt1_id, opt2_id,
+      dist_opt1, dist_opt2,
+      shortest_path_given_start_end = short_dist
+    ) %>%
+    mutate(
+      # Did subjects choose option 1 or 2? Depends on whether "option 1" was
+      # shown on the left or right side of the screen
+      sub_choice = case_when(
+        display_left == TRUE & key_press == 70 ~ opt1_id,
+        display_left == FALSE & key_press == 74 ~ opt1_id,
+        TRUE ~ opt2_id
+      ),
+      # The task sometimes presents subjects with an "impossible" option to
+      # pass a message from one node to the endpoint without having the letter
+      # return to the sender. The following code basically accounts for this
+      # happening, when scoring the "correctness" of a subject's answer
+      one_impossible_option = dist_opt1 == 0 | dist_opt2 == 0,
+      # The task sometimes presents two equally correct answers
+      two_correct_options = dist_opt1 == dist_opt2,
+      shortest_path_given_opts = case_when(
+        # Both distances are equal
+        two_correct_options ~ dist_opt1,
+        # Only one distance is "possible"
+        one_impossible_option == TRUE & dist_opt1 > dist_opt2 ~ dist_opt1,
+        one_impossible_option == TRUE & dist_opt1 < dist_opt2 ~ dist_opt2,
+        # Otherwise, shortest distance is straightforward
+        dist_opt1 < dist_opt2 ~ dist_opt1,
+        dist_opt1 > dist_opt2 ~ dist_opt2
+      ),
+      correct_choice = case_when(
+        # No single correct choice when both are equally good
+        two_correct_options ~ NA_character_,
+        # Penalize the impossible option
+        one_impossible_option == TRUE & dist_opt1 > dist_opt2 ~ opt1_id,
+        one_impossible_option == TRUE & dist_opt1 < dist_opt2 ~ opt2_id,
+        # Otherwise, the correct answer is the shortest path
+        dist_opt1 < dist_opt2 ~ opt1_id,
+        dist_opt1 > dist_opt2 ~ opt2_id
+      ),
+      # Mark correct guesses based on the discrepancy between the subject's
+      # choice vs what we know to be the "correct" choice
+      correct = sub_choice == correct_choice | two_correct_options
+    ) %>%
+    # Relabel option IDs so that the correct answer is always first
+    mutate(
+      opt1_id_sorted = if_else(
+        opt1_id == correct_choice | two_correct_options, opt1_id, opt2_id
+      ),
+      opt2_id_sorted = if_else(
+        opt1_id == correct_choice | two_correct_options, opt2_id, opt1_id
+      ),
+      dist_opt1_sorted = if_else(
+        opt1_id == correct_choice | two_correct_options, dist_opt1, dist_opt2
+      ),
+      dist_opt2_sorted = if_else(
+        opt1_id == correct_choice | two_correct_options, dist_opt2, dist_opt1
+      )
+    ) %>%
+    select(-c(opt1_id, opt2_id, dist_opt1, dist_opt2)) %>%
+    rename(
+      opt1_id = opt1_id_sorted,
+      opt2_id = opt2_id_sorted,
+      dist_opt1 = dist_opt1_sorted,
+      dist_opt2 = dist_opt2_sorted
+    ) %>%
+    # Renumber trials
+    group_by(measurement_id, sub_id, network) %>%
+    mutate(trial = row_number()) %>%
+    ungroup() %>%
+    # Convert node labels into numeric IDs
+    left_join(node_crosswalk, by = c("startpoint_id" = "node_label")) %>%
+    left_join(node_crosswalk, by = c("endpoint_id" = "node_label")) %>%
+    select(-c(startpoint_id, endpoint_id)) %>%
+    rename(startpoint_id = node_id.x, endpoint_id = node_id.y) %>%
+    left_join(node_crosswalk, by = c("opt1_id" = "node_label")) %>%
+    left_join(node_crosswalk, by = c("opt2_id" = "node_label")) %>%
+    select(-c(opt1_id, opt2_id)) %>%
+    rename(opt1_id = node_id.x, opt2_id = node_id.y) %>%
+    left_join(node_crosswalk, by = c("sub_choice" = "node_label")) %>%
+    left_join(node_crosswalk, by = c("correct_choice" = "node_label")) %>%
+    select(-c(sub_choice, correct_choice)) %>%
+    rename(sub_choice = node_id.x, correct_choice = node_id.y) %>%
+    type_convert(col_types = cols()) %>%
+    # Mark "impossible" distances
+    mutate(across(c(dist_opt1, dist_opt2), ~if_else(.x == 0, NA_real_, .x))) %>%
+    # Make pretty
+    arrange(measurement_id, sub_id, network, trial) %>%
+    select(
+      measurement_id, sub_id, network, trial,
+      startpoint_id, endpoint_id, opt1_id, opt2_id,
+      correct_choice, sub_choice, correct, rt,
+      dist_opt1, dist_opt2,
+      shortest_path_given_opts, shortest_path_given_start_end,
+      one_impossible_option, two_correct_options
+    ) %>%
+    mutate(
+      network = if_else(network == "main_network", "learned", "reevaluated")
+    )
+}
+
+mpt_study1 <- raw_study1 %>%
+  mutate(
+    measurement_id = 1,
+    network = "main_network"
+  ) %>%
+  clean_mpt()
+
+mpt_study2 <- raw_study2 %>%
+  mutate(measurement_id = session) %>%
+  clean_mpt()
+
+mpt_study3 <- raw_study3 %>%
+  mutate(
+    measurement_id = case_when(
+      session == 1 & trial_index < 512 ~ 1,
+      session == 1 ~ 2,
+      session == 2 ~ 3,
+    )
+  ) %>%
+  clean_mpt()
+```
+
+
+# Export data
+
+```{r export-data}
+if (knitr::is_html_output()) {
+  if (!dir.exists(here("data", "clean-data"))) {
+    dir.create(here("data", "clean-data"))
+  }
+  
+  ### Stim mappings
+  nodes_study1 %>%
+    write_csv(here("data", "clean-data", "study1_node_mappings.csv"))
+  
+  nodes_study2 %>%
+    write_csv(here("data", "clean-data", "study2_node_mappings.csv"))
+  
+  nodes_study3 %>%
+    write_csv(here("data", "clean-data", "study3_node_mappings.csv"))
+  
+  ### Learning
+  learn_study1 %>%
+    write_csv(here("data", "clean-data", "study1_learn.csv"))
+  
+  learn_study2 %>%
+    write_csv(here("data", "clean-data", "study2_learn.csv"))
+  
+  learn_study3 %>%
+    write_csv(here("data", "clean-data", "study3_learn.csv"))
+  
+  ### Memory sequences
+  mem_seq_study1 %>%
+    write_csv(here("data", "clean-data", "study1_memory_sequences.csv"))
+  
+  mem_seq_study2 %>%
+    write_csv(here("data", "clean-data", "study2_memory_sequences.csv"))
+  
+  mem_seq_study3 %>%
+    write_csv(here("data", "clean-data", "study3_memory_sequences.csv"))
+  
+  ### Memory pairwise
+  mem_all_study1 %>%
+    write_csv(here("data", "clean-data", "study1_memory.csv"))
+  
+  mem_all_study2 %>%
+    write_csv(here("data", "clean-data", "study2_memory.csv"))
+  
+  mem_all_study3 %>%
+    write_csv(here("data", "clean-data", "study3_memory.csv"))
+  
+  ### Message-passing task
+  mpt_study1 %>%
+    write_csv(here("data", "clean-data", "study1_message_passing.csv"))
+  
+  mpt_study2 %>%
+    write_csv(here("data", "clean-data", "study2_message_passing.csv"))
+  
+  mpt_study3 %>%
+    write_csv(here("data", "clean-data", "study3_message_passing.csv"))
+  
+  ### Network info
+  adjlist %>%
+    write_csv(here("data", "clean-data", "adjlist_learned.csv"))
+  
+  adjlist_reevaluation %>%
+    write_csv(here("data", "clean-data", "adjlist_reevaluated.csv"))
+}
+```
+
