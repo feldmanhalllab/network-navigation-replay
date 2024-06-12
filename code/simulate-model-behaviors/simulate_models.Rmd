@@ -1633,7 +1633,7 @@ plot_sr_summary <- predicted_sr_navigation %>%
     name = "Accuracy", labels = scales::percent, limits = c(0.5, 1)
   ) +
   theme(legend.position = "bottom") +
-  ggtitle("Simulated ideal observer")
+  ggtitle("Simulated Successor Rep.")
 
 plot_sr_trials
 plot_sr_summary
