@@ -12,6 +12,8 @@ output:
 # Setup
 
 ```{r libraries}
+workflow_name <- "netnav_03_parameter_recovery"
+
 library(tidyverse)
 library(here)
 library(broom)
@@ -29,7 +31,7 @@ create_path <- function(this_path) {
 }
 
 if (knitting) {
-  here("outputs", "param-recovery") %>%
+  here("outputs", workflow_name) %>%
     create_path()
   
   here("figures") %>%
@@ -43,7 +45,7 @@ if (knitting) {
 In the previous iteration of this work, we had estimated models containing lapse rate parameters. The rationale was that there might be some amount of irreducible decision noise in subjects' behaviors (e.g., occasional lapses in attention, resulting in random responses). However, it's entirely possible that the lapse rate cannot be reliably estimated given our data, and if this is true, trying to estimate a lapse rate could end up introducing other kinds of biases in our parameter estimation.
 
 ```{r load-lapse-params-true}
-lapse_params_true <- here("data", "simulated-model-behaviors") %>%
+lapse_params_true <- here("data", "simulated_model_behaviors") %>%
   fs::dir_ls(regexp = "with_lapse\\.csv") %>%
   map_dfr(.f = ~read_csv(.x, show_col_types = FALSE), .id = "filename") %>%
   mutate(
@@ -64,7 +66,7 @@ lapse_params_true <- here("data", "simulated-model-behaviors") %>%
 Starting with the SR, we can see that recovery of the SR gamma parameter is pretty dismal.
 
 ```{r recovery-lapse-sr-gamma}
-lapse_params_est_sr <- here("data", "param-recovery", "sr-with-lapse") %>%
+lapse_params_est_sr <- here("data", "param_recovery", "sr_with_lapse") %>%
   fs::dir_ls(glob = "*.csv") %>%
   map_dfr(.f = ~read_csv(.x, show_col_types = FALSE), .id = "filename") %>%
   mutate(
@@ -208,7 +210,7 @@ plot_recovery_sr_lapse_combined
 
 if (knitting) {
   ggsave(
-    filename = here("outputs", "param-recovery", "param_recovery_sr_lapse.pdf"),
+    filename = here("outputs", workflow_name, "param_recovery_sr_lapse.pdf"),
     plot = plot_recovery_sr_lapse_combined,
     width = 8, height = 4,
     units = "in", dpi = 300
@@ -224,7 +226,7 @@ Results indicate recovery of the search threshold parameter is mediocre.
 
 ```{r recovery-lapse-bfs-forward-search-threshold}
 lapse_params_est_bfs_forward <- here(
-  "data", "param-recovery", "bfs-forward-with-lapse"
+  "data", "param_recovery", "bfs_forward_with_lapse"
 ) %>%
   fs::dir_ls(glob = "*.csv") %>%
   map_dfr(.f = ~read_csv(.x, show_col_types = FALSE), .id = "filename") %>%
@@ -326,7 +328,7 @@ plot_recovery_bfs_forward_lapse_combined
 if (knitting) {
   ggsave(
     filename = here(
-      "outputs", "param-recovery", "param_recovery_bfs_forward_lapse.pdf"
+      "outputs", workflow_name, "param_recovery_bfs_forward_lapse.pdf"
     ),
     plot = plot_recovery_bfs_forward_lapse_combined,
     width = 8, height = 4,
@@ -341,7 +343,7 @@ if (knitting) {
 Since it appears that lapse rates cannot be reliably recovered, we'll now try looking at models that don't contain a lapse rate. Note that these include new models that we've added in the revision.
 
 ```{r load-params-no-lapse}
-params_true <- here("data", "simulated-model-behaviors") %>%
+params_true <- here("data", "simulated_model_behaviors") %>%
   fs::dir_ls(regexp = "no_lapse\\.csv") %>%
   map_dfr(.f = ~read_csv(.x, show_col_types = FALSE), .id = "filename") %>%
   mutate(
@@ -354,9 +356,9 @@ params_true <- here("data", "simulated-model-behaviors") %>%
   ) %>%
   drop_na()
 
-params_est <- here("data", "param-recovery") %>%
+params_est <- here("data", "param_recovery") %>%
   fs::dir_ls(
-    regexp = "(bfs-(backward|forward)|ideal-obs|sr)-no-lapse(.)+\\.csv",
+    regexp = "(bfs_(backward|forward)|ideal_obs|sr)_no_lapse(.)+\\.csv",
     recurse = 1
   ) %>%
   map_dfr(.f = ~read_csv(.x, show_col_types = FALSE), .id = "filename") %>%
@@ -635,9 +637,7 @@ plot_recovery_combined
 
 if (knitting) {
   ggsave(
-    filename = here(
-      "outputs", "param-recovery", "param_recovery_combined.pdf"
-    ),
+    filename = here("outputs", workflow_name, "param_recovery_combined.pdf"),
     plot = plot_recovery_combined,
     width = 8, height = 6,
     units = "in", dpi = 300
@@ -645,9 +645,7 @@ if (knitting) {
   
   # Redundant copy
   ggsave(
-    filename = here(
-      "figures", "supp_param_recovery.pdf"
-    ),
+    filename = here("figures", "supp_param_recovery.pdf"),
     plot = plot_recovery_combined,
     width = 8, height = 6,
     units = "in", dpi = 300

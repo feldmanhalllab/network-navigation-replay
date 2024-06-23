@@ -1,6 +1,6 @@
 #! /bin/bash
 
-workflow_name="analyses"
+workflow_name="netnav_03_parameter_recovery"
 
 ### Boilerplate setup
 
