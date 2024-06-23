@@ -46,7 +46,7 @@ node_crosswalk <- tribble(
 
 Note: Despite what the variable names imply, these data are not the fully raw data, but come very close.
 
-Some of the raw data inadvertantly included information like IP addresses that could be considered sensitive and unsuitable for public sharing; the data in this repository have removed such information so that responses are fully anonymized. There were also a small number of subjects who had been noted as being noncompliant during the study session; their data were never analyzed, and additional subjects were recruited in their place to meet the target N. Those data are not included in the "source" datafiles here.
+Some of the raw data inadvertently included information like IP addresses that could be considered sensitive and unsuitable for public sharing; the data in this repository have removed such information so that responses are fully anonymized. There were also a small number of subjects who had been noted as being noncompliant during the study session; their data were never analyzed, and additional subjects were recruited in their place to meet the target N. Those data are not included in the "source" datafiles here.
 
 ```{r load-data}
 raw_study1 <- here("data", "source-data", "social_navigation_study1.csv") %>%
@@ -69,7 +69,7 @@ raw_study3 <- here("data", "source-data", "social_navigation_study3.csv") %>%
 
 # Stimulus mappings
 
-We might want to know what 
+Though every subject learned about the same network structure, stimuli were randomly mapped to nodes. Here, we'll save the mappings from each subject's session.
 
 ```{r clean-stim-mappings}
 clean_stim_mappings <- function(df) {
