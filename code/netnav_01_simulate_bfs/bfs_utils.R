@@ -154,3 +154,53 @@ mpt_bfs <- function(
   )
 }
 
+mpt_bfs_reverse <- function(
+    input_tbl_graph, startpoint, endpoint, option_a, option_b
+) {
+  # Message-passing task forbids returning the message back to sender
+  modified_graph <- input_tbl_graph %>%
+    mutate(name = row_number()) %>%
+    igraph::delete_vertices(startpoint)
+  
+  # Initialize visit/queue vectors
+  visits <- endpoint
+  queue <- endpoint
+  
+  # Initialize flag for stopping search
+  endpoint_reached <- FALSE
+  
+  # For storing info about each BFS iteration
+  iteration <- 0
+  
+  # Search until an answer is found
+  while(!endpoint_reached) {
+    # Increment iterations
+    iteration <- iteration + 1
+    
+    # Perform a single BFS iteration
+    bfs_iter <- single_bfs_iter(
+      modified_graph, visits, queue, c(option_a, option_b)
+    )
+    visits <- bfs_iter$visits
+    queue <- bfs_iter$queue
+    endpoint_reached <- bfs_iter$endpoint_reached
+  }
+  
+  # Which option is chosen?
+  if(all(c(option_a, option_b) %in% visits)) {
+    option_chosen = NA
+  } else if(option_a %in% visits) {
+    option_chosen = option_a
+  } else {
+    option_chosen = option_b
+  }
+  
+  return(
+    tibble(
+      bfs_iter = iteration,
+      bfs_n_visits_total = length(unique(visits)),
+      bfs_choice = option_chosen
+    )
+  )
+}
+

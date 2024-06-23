@@ -9,9 +9,9 @@
 #SBATCH --cpus-per-task 1
 #SBATCH --mem-per-cpu=4gb
 
-#SBATCH --output=bfs-sim-learned-reverse.out
+#SBATCH --output=bfs_sim_reevaluated_backward.out
 
-workflow_name="simulate-bfs"
+workflow_name="netnav_01_simulate_bfs"
 
 ### Boilerplate setup
 
@@ -44,5 +44,5 @@ cd ${here}/code/${workflow_name}
 
 ### Run script
 
-Rscript bfs_sim_learned_reverse.R
+Rscript bfs_sim_reevaluated_backward.R
 

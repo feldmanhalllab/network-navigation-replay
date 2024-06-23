@@ -17,13 +17,13 @@ library(here)
 library(tidygraph)
 library(tictoc)
 
-source(here("code", "simulate-bfs", "bfs_utils.R"))
+source(here("code", "simulate_bfs", "bfs_utils.R"))
 
 
 #### Load data ####
 
 # MPT = Message-Passing Task, aka the social navigation task
-mpt_data <- here("data", "clean-data", "study1_message_passing.csv") %>%
+mpt_data <- here("data", "clean_data", "study1_message_passing.csv") %>%
   read_csv(show_col_types = FALSE) %>%
   filter(sub_id == 1) %>%
   arrange(startpoint_id, endpoint_id, opt1_id, opt2_id) %>%
@@ -37,7 +37,7 @@ mpt_data <- here("data", "clean-data", "study1_message_passing.csv") %>%
   ) %>%
   mutate(trial = row_number())
 
-adjlist <- here("data", "clean-data", "adjlist_learned.csv") %>%
+adjlist <- here("data", "clean_data", "adjlist_learned.csv") %>%
   read_csv(show_col_types = FALSE)
 
 g <- adjlist %>%
@@ -71,13 +71,13 @@ toc()
 #### Save results ####
 
 if (run_on_cluster) {
-  if (!dir.exists(here("data", "bfs-sims"))) {
-    dir.create(here("data", "bfs-sims"))
+  if (!dir.exists(here("data", "bfs_sims"))) {
+    dir.create(here("data", "bfs_sims"))
   }
   
   bfs_sims %>%
     select(-trial) %>%
     arrange(startpoint_id, endpoint_id, opt1_id, opt2_id, rep) %>%
-    write_csv(here("data", "bfs-sims", "bfs_sims_learned_reverse.csv"))
+    write_csv(here("data", "bfs_sims", "bfs_sims_learned_backward.csv"))
 }
 

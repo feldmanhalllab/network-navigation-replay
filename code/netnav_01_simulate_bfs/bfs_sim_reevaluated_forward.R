@@ -10,22 +10,22 @@ if ( run_on_cluster ) {
 }
 
 # Set a random seed for reproducibility
-set.seed(sum(utf8ToInt("pigeons do bread-first search")))
+set.seed(sum(utf8ToInt("still haven't found what I'm looking for")))
 
 library(tidyverse)
 library(here)
 library(tidygraph)
 library(tictoc)
 
-source(here("code", "simulate-bfs", "bfs_utils.R"))
+source(here("code", "simulate_bfs", "bfs_utils.R"))
 
 
 #### Load data ####
 
 # MPT = Message-Passing Task, aka the social navigation task
-mpt_data <- here("data", "clean-data", "study1_message_passing.csv") %>%
+mpt_data <- here("data", "clean_data", "study2_message_passing.csv") %>%
   read_csv(show_col_types = FALSE) %>%
-  filter(sub_id == 1) %>%
+  filter(sub_id == 1, network == "reevaluated") %>%
   arrange(startpoint_id, endpoint_id, opt1_id, opt2_id) %>%
   select(
     startpoint_id, endpoint_id,
@@ -37,7 +37,7 @@ mpt_data <- here("data", "clean-data", "study1_message_passing.csv") %>%
   ) %>%
   mutate(trial = row_number())
 
-adjlist <- here("data", "clean-data", "adjlist_learned.csv") %>%
+adjlist <- here("data", "clean_data", "adjlist_reevaluated.csv") %>%
   read_csv(show_col_types = FALSE)
 
 g <- adjlist %>%
@@ -69,13 +69,13 @@ toc()
 #### Save results ####
 
 if (run_on_cluster) {
-  if (!dir.exists(here("data", "bfs-sims"))) {
-    dir.create(here("data", "bfs-sims"))
+  if (!dir.exists(here("data", "bfs_sims"))) {
+    dir.create(here("data", "bfs_sims"))
   }
   
   bfs_sims %>%
     select(-trial) %>%
     arrange(startpoint_id, endpoint_id, opt1_id, opt2_id, rep) %>%
-    write_csv(here("data", "bfs-sims", "bfs_sims_learned.csv"))
+    write_csv(here("data", "bfs_sims", "bfs_sims_reevaluated_forward.csv"))
 }
 
