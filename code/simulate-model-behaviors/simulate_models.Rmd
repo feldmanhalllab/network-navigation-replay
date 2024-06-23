@@ -41,6 +41,9 @@ create_path <- function(this_path) {
 }
 
 if (knitting) {
+  here("figures") %>%
+    create_path()
+  
   here("outputs", "simulate-model-behaviors") %>%
     create_path()
   
@@ -209,7 +212,7 @@ if (knitting) {
       "outputs", "simulate-model-behaviors", "bfs_backward_summary.pdf"
     ),
     plot = plot_bfs_backward_summary,
-    width = 3, height = 3,
+    width = 5, height = 5,
     units = "in", dpi = 300
   )
 }
@@ -324,7 +327,7 @@ if (knitting) {
       "outputs", "simulate-model-behaviors", "bfs_backward_param_dist.pdf"
     ),
     plot = plot_param_dist_bfs_backward,
-    width = 5, height = 2.5,
+    width = 5, height = 5,
     units = "in", dpi = 300
   )
   
@@ -424,7 +427,7 @@ if (knitting) {
       "outputs", "simulate-model-behaviors", "bfs_forward_summary.pdf"
     ),
     plot = plot_bfs_forward_summary,
-    width = 3, height = 3,
+    width = 5, height = 5,
     units = "in", dpi = 300
   )
 }
@@ -577,7 +580,7 @@ if (knitting) {
       "bfs_forward_param_dist.pdf"
     ),
     plot = plot_param_dist_bfs_forward,
-    width = 5, height = 2.5,
+    width = 5, height = 5,
     units = "in", dpi = 300
   )
   
@@ -682,7 +685,7 @@ if (knitting) {
       "outputs", "simulate-model-behaviors", "ideal_obs_summary.pdf"
     ),
     plot = plot_ideal_obs_summary,
-    width = 3, height = 3,
+    width = 5, height = 5,
     units = "in", dpi = 300
   )
 }
@@ -781,7 +784,7 @@ if (knitting) {
       "outputs", "simulate-model-behaviors", "ideal_obs_param_dist.pdf"
     ),
     plot = plot_param_dist_ideal_obs,
-    width = 5, height = 2.5,
+    width = 5, height = 5,
     units = "in", dpi = 300
   )
   
@@ -1516,7 +1519,10 @@ plot_sr_comparison_2 <- left_join(
     aes(group = method), geom = "line", fun = mean, linewidth = 1
   ) +
   geom_point(alpha = 0.25, show.legend = FALSE) +
-  scale_color_viridis_d(name = "SR:", end = 0.8) +
+  scale_color_manual(
+    name = "SR implementation",
+    values = c("Analytic"="#ca0020", "Delta-rule"="#0571b0")
+  ) +
   scale_x_discrete(name = "Shortest path distance") +
   scale_y_continuous(
     name = "Accuracy",
@@ -1534,7 +1540,7 @@ if (knitting) {
       "outputs", "simulate-model-behaviors", "sr_analytic_vs_delta_rule_2.pdf"
     ),
     plot = plot_sr_comparison_2,
-    width = 4, height = 5,
+    width = 5, height = 5,
     units = "in", dpi = 300,
     device = cairo_pdf
   )
@@ -1654,7 +1660,7 @@ if (knitting) {
       "outputs", "simulate-model-behaviors", "sr_summary.pdf"
     ),
     plot = plot_sr_summary,
-    width = 6, height = 6,
+    width = 5, height = 5,
     units = "in", dpi = 300,
     device = cairo_pdf
   )
@@ -1782,7 +1788,7 @@ if (knitting) {
       "outputs", "simulate-model-behaviors", "sr_param_dist.pdf"
     ),
     plot = plot_param_dist_sr,
-    width = 5, height = 2.5,
+    width = 5, height = 5,
     units = "in", dpi = 300
   )
   
@@ -1791,7 +1797,7 @@ if (knitting) {
       "outputs", "simulate-model-behaviors", "sr_param_dist_softmax.pdf"
     ),
     plot = plot_param_dist_sr_softmax,
-    width = 5, height = 2.5,
+    width = 5, height = 5,
     units = "in", dpi = 300
   )
   
@@ -1810,6 +1816,52 @@ if (knitting) {
         "sim_nav_sr_with_lapse.csv"
       )
     )
+}
+```
+
+
+# Figure for supplement
+
+The very last thing we want to do is to create a figure of the simulated *a priori* predictions for all planning models, to put into the supplement.
+
+```{r plot-planning-for-supp}
+plot_nav_predictions_for_supp <- wrap_plots(
+  plot_bfs_backward_summary +
+    ggtitle("BFS-backward") +
+    scale_color_viridis_c(
+      name = "Search threshold", option = "turbo", end = 0.9
+    ),
+  plot_bfs_forward_summary +
+    ggtitle("BFS-forward") +
+    scale_color_viridis_c(
+      name = "Search threshold", option = "turbo", end = 0.9
+    ),
+  plot_ideal_obs_summary +
+    ggtitle("Ideal observer") +
+    scale_color_viridis_c(
+      name = "Inverse temperature",
+      option = "inferno", direction = -1, begin = 0.4
+    ),
+  nrow = 1, guides = "collect"
+) +
+  plot_annotation(
+    title = "Simulated behavior: Model-based planning",
+    theme = theme(plot.title = element_text(hjust = 0.5)),
+    tag_levels = "A", tag_suffix = "."
+  ) &
+  theme(legend.position = "bottom")
+
+plot_nav_predictions_for_supp
+
+if (knitting) {
+  ggsave(
+    filename = here(
+      "figures", "supp_sim_model_based_planning.pdf"
+    ),
+    plot = plot_nav_predictions_for_supp,
+    width = 8, height = 4,
+    units = "in", dpi = 300
+  )
 }
 ```
 

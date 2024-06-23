@@ -19,6 +19,7 @@ library(patchwork)
 
 source(here("code", "utils", "ggplot_themes.R"))
 source(here("code", "utils", "kable_utils.R"))
+source(here("code", "utils", "bayesian_model_selection.R"))
 
 knitting <- knitr::is_html_output()
 
@@ -30,6 +31,9 @@ create_path <- function(this_path) {
 
 if (knitting) {
   here("outputs", "model-confusion") %>%
+    create_path()
+  
+  here("figures") %>%
     create_path()
 }
 ```
@@ -214,8 +218,6 @@ if (knitting) {
 Finally, we might be curious to see whether we can use protected exceedance probability (PXP) to make reliable inferences about the most probable group-level model. Note that this analysis is likely to be over-optimistic, as the simulated data were noise-free.
 
 ```{r pxp}
-source(here("code", "utils", "bayesian_model_selection.R"))
-
 pxp_results <- aicc %>%
   select(sub_id, true_model, fit_model, aicc) %>%
   # In the PXP analysis, more is more, so sign-flip AICc so that greater values
@@ -263,6 +265,37 @@ if (knitting) {
     ),
     plot = plot_pxp,
     width = 5, height = 2.5,
+    units = "in", dpi = 300
+  )
+}
+```
+
+
+# Figure for supplement
+
+In the supplement, we'll want a plot of both the confusion and inversion matrices.
+
+```{r plot-model-recovery-for-supp}
+plot_confusion_for_supp <- wrap_plots(
+  plot_confusion_matrix,
+  plot_inversion_matrix,
+  nrow = 1
+) +
+  plot_annotation(
+    title = "Model recovery",
+    theme = theme(plot.title = element_text(hjust = 0.5)),
+    tag_levels = "A", tag_suffix = "."
+  )
+
+plot_confusion_for_supp
+
+if (knitting) {
+  ggsave(
+    filename = here(
+      "figures", "supp_model_recovery.pdf"
+    ),
+    plot = plot_confusion_for_supp,
+    width = 8, height = 4,
     units = "in", dpi = 300
   )
 }
