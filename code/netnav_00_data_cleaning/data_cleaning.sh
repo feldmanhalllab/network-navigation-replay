@@ -1,6 +1,6 @@
 #! /bin/bash
 
-workflow_name="data_cleaning"
+workflow_name="netnav_00_data_cleaning"
 
 ### Boilerplate setup
 
