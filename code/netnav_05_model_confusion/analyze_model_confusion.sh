@@ -1,6 +1,6 @@
 #! /bin/bash
 
-workflow_name="analyses"
+workflow_name="netnav_05_model_confusion"
 
 ### Boilerplate setup
 
@@ -37,5 +37,5 @@ save_dir=${output_dir}/${workflow_name}
 mkdir -m 775 ${output_dir}
 mkdir -m 775 ${save_dir}
 
-R -e "rmarkdown::render('model_confusion.Rmd', output_dir='${save_dir}')"
+R -e "rmarkdown::render('analyze_model_confusion.Rmd', output_dir='${save_dir}')"
 
