@@ -49,19 +49,19 @@ Note: Despite what the variable names imply, these data are not the fully raw da
 Some of the raw data inadvertently included information like IP addresses that could be considered sensitive and unsuitable for public sharing; the data in this repository have removed such information so that responses are fully anonymized. There were also a small number of subjects who had been noted as being noncompliant during the study session; their data were never analyzed, and additional subjects were recruited in their place to meet the target N. Those data are not included in the "source" datafiles here.
 
 ```{r load-data}
-raw_study1 <- here("data", "source-data", "social_navigation_study1.csv") %>%
+raw_study1 <- here("data", "source_data", "social_navigation_study1.csv") %>%
   read_csv(show_col_types = FALSE)
 
-raw_study2 <- here("data", "source-data", "social_navigation_study2.csv") %>%
+raw_study2 <- here("data", "source_data", "social_navigation_study2.csv") %>%
   read_csv(show_col_types = FALSE)
 
 # `readr::read_csv` throws a warning about parsing issues, and indeed the
 # resulting tibble appears to contain problems...
 # 
-# raw_study3 <- here("data", "source-data", "social_navigation_study3.csv") %>%
+# raw_study3 <- here("data", "source_data", "social_navigation_study3.csv") %>%
 #   read_csv(show_col_types = FALSE)
 
-raw_study3 <- here("data", "source-data", "social_navigation_study3.csv") %>%
+raw_study3 <- here("data", "source_data", "social_navigation_study3.csv") %>%
   read.csv() %>%
   as_tibble()
 ```
@@ -356,7 +356,7 @@ clean_mpt <- function(df) {
   df %>%
     # Keep relevant data only
     filter(trial_purpose == "test_resp") %>%
-    # Note from JYS on May 16, 2023
+    # Note from JYS:
     # The column `short_dist` is misleadingly named. Consider the set of trials
     # where startpoint==12 and endpoint==8. Node 12 can pass the message to any of
     # their friends: 10, 11, or 13. Let's call this 12-->8 set of trials a
@@ -497,66 +497,66 @@ mpt_study3 <- raw_study3 %>%
 
 ```{r export-data}
 if (knitr::is_html_output()) {
-  if (!dir.exists(here("data", "clean-data"))) {
-    dir.create(here("data", "clean-data"))
+  if (!dir.exists(here("data", "clean_data"))) {
+    dir.create(here("data", "clean_data"))
   }
   
   ### Stim mappings
   nodes_study1 %>%
-    write_csv(here("data", "clean-data", "study1_node_mappings.csv"))
+    write_csv(here("data", "clean_data", "study1_node_mappings.csv"))
   
   nodes_study2 %>%
-    write_csv(here("data", "clean-data", "study2_node_mappings.csv"))
+    write_csv(here("data", "clean_data", "study2_node_mappings.csv"))
   
   nodes_study3 %>%
-    write_csv(here("data", "clean-data", "study3_node_mappings.csv"))
+    write_csv(here("data", "clean_data", "study3_node_mappings.csv"))
   
   ### Learning
   learn_study1 %>%
-    write_csv(here("data", "clean-data", "study1_learn.csv"))
+    write_csv(here("data", "clean_data", "study1_learn.csv"))
   
   learn_study2 %>%
-    write_csv(here("data", "clean-data", "study2_learn.csv"))
+    write_csv(here("data", "clean_data", "study2_learn.csv"))
   
   learn_study3 %>%
-    write_csv(here("data", "clean-data", "study3_learn.csv"))
+    write_csv(here("data", "clean_data", "study3_learn.csv"))
   
   ### Memory sequences
   mem_seq_study1 %>%
-    write_csv(here("data", "clean-data", "study1_memory_sequences.csv"))
+    write_csv(here("data", "clean_data", "study1_memory_sequences.csv"))
   
   mem_seq_study2 %>%
-    write_csv(here("data", "clean-data", "study2_memory_sequences.csv"))
+    write_csv(here("data", "clean_data", "study2_memory_sequences.csv"))
   
   mem_seq_study3 %>%
-    write_csv(here("data", "clean-data", "study3_memory_sequences.csv"))
+    write_csv(here("data", "clean_data", "study3_memory_sequences.csv"))
   
   ### Memory pairwise
   mem_all_study1 %>%
-    write_csv(here("data", "clean-data", "study1_memory.csv"))
+    write_csv(here("data", "clean_data", "study1_memory.csv"))
   
   mem_all_study2 %>%
-    write_csv(here("data", "clean-data", "study2_memory.csv"))
+    write_csv(here("data", "clean_data", "study2_memory.csv"))
   
   mem_all_study3 %>%
-    write_csv(here("data", "clean-data", "study3_memory.csv"))
+    write_csv(here("data", "clean_data", "study3_memory.csv"))
   
   ### Message-passing task
   mpt_study1 %>%
-    write_csv(here("data", "clean-data", "study1_message_passing.csv"))
+    write_csv(here("data", "clean_data", "study1_message_passing.csv"))
   
   mpt_study2 %>%
-    write_csv(here("data", "clean-data", "study2_message_passing.csv"))
+    write_csv(here("data", "clean_data", "study2_message_passing.csv"))
   
   mpt_study3 %>%
-    write_csv(here("data", "clean-data", "study3_message_passing.csv"))
+    write_csv(here("data", "clean_data", "study3_message_passing.csv"))
   
   ### Network info
   adjlist %>%
-    write_csv(here("data", "clean-data", "adjlist_learned.csv"))
+    write_csv(here("data", "clean_data", "adjlist_learned.csv"))
   
   adjlist_reevaluation %>%
-    write_csv(here("data", "clean-data", "adjlist_reevaluated.csv"))
+    write_csv(here("data", "clean_data", "adjlist_reevaluated.csv"))
 }
 ```
 
