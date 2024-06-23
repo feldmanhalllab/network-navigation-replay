@@ -4,15 +4,15 @@
 #SBATCH --mail-type=END
 #SBATCH --mail-user=jae@brown.edu
 
-#SBATCH -t 15:00
+#SBATCH -t 1:00
 #SBATCH -N 1
 #SBATCH --cpus-per-task 1
 #SBATCH --mem-per-cpu=1gb
 
-#SBATCH --output=fit_model_sr_true_model_sr_sub_%a.out
+#SBATCH --output=fit_model_bfs_backward_true_model_bfs_backward_sub_%a.out
 #SBATCH --array=1-500
 
-workflow_name="model-confusion"
+workflow_name="netnav_05_model_confusion"
 
 
 ### Boilerplate setup
@@ -44,6 +44,6 @@ done
 
 ### Run script
 
-cd ${here}/code/${workflow_name}/fitting-scripts/
-Rscript confusion_sr.R sr
+cd ${here}/code/${workflow_name}/fitting_scripts/
+Rscript confusion_bfs_backward.R bfs_backward
 

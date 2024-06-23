@@ -10,7 +10,7 @@ library(tictoc)
 
 # Load in utils
 source(here("code", "utils", "modeling_utils.R"))
-source(here("code", "fit-params", "objective_functions.R"))
+source(here("code", "netnav_04_fit_params", "objective_functions.R"))
 
 create_path <- function(this_path) {
   if (!dir.exists(this_path)) {
@@ -18,7 +18,7 @@ create_path <- function(this_path) {
   }
 }
 
-save_results_to <- here("data", "model-confusion", this_fit_model, "")
+save_results_to <- here("data", "model_confusion", this_fit_model, "")
 
 if (run_on_cluster) {
   # Get args from shell script and SLURM environment
@@ -44,7 +44,7 @@ if (run_on_cluster) {
 #### Load/tidy data ####
 
 bfs_backward_sims <- here(
-  "data", "bfs-sims", "bfs_sims_learned_reverse.csv"
+  "data", "bfs_sims", "bfs_sims_learned_backward.csv"
 ) %>%
   read_csv(show_col_types = FALSE) %>%
   filter(
@@ -61,7 +61,7 @@ bfs_backward_sims <- here(
   )
 
 behavior <- here(
-  "data", "simulated-model-behaviors",
+  "data", "simulated_model_behaviors",
   str_c("sim_nav_", this_true_model, "_confusion.csv")
 ) %>%
   read_csv(show_col_types = FALSE) %>%

@@ -1,7 +1,7 @@
 #### Initialize ####
 
 run_on_cluster <- TRUE
-this_fit_model <- "ideal_obs"
+this_fit_model <- "bfs_forward"
 
 # Keep dependencies to a minimum
 library(tidyverse)
@@ -10,7 +10,7 @@ library(tictoc)
 
 # Load in utils
 source(here("code", "utils", "modeling_utils.R"))
-source(here("code", "fit-params", "objective_functions.R"))
+source(here("code", "netnav_04_fit_params", "objective_functions.R"))
 
 create_path <- function(this_path) {
   if (!dir.exists(this_path)) {
@@ -18,7 +18,7 @@ create_path <- function(this_path) {
   }
 }
 
-save_results_to <- here("data", "model-confusion", this_fit_model, "")
+save_results_to <- here("data", "model_confusion", this_fit_model, "")
 
 if (run_on_cluster) {
   # Get args from shell script and SLURM environment
@@ -34,7 +34,7 @@ if (run_on_cluster) {
 } else {
   # For local testing/debugging
   this_sub <- 1
-  this_true_model <- "sr"
+  this_true_model <- "ideal_obs"
   
   this_many_runs <- 2
   this_many_iter_per_run <- 1000
@@ -43,22 +43,25 @@ if (run_on_cluster) {
 
 #### Load/tidy data ####
 
-option_distances <- here(
-  "data", "simulated-model-behaviors",
-  str_c("sim_nav_", this_fit_model, "_confusion.csv")
+bfs_forward_sims <- here(
+  "data", "bfs_sims", "bfs_sims_learned_forward.csv"
 ) %>%
   read_csv(show_col_types = FALSE) %>%
-  filter(sub_id == this_sub) %>%
-  select(
-    shortest_path,
-    startpoint_id, endpoint_id,
-    opt1_id, opt2_id,
-    opt1_distance, opt2_distance
+  filter(
+    shortest_path_given_opts == shortest_path_given_start_end,
+    two_correct_options == FALSE
   ) %>%
-  mutate(shortest_path = factor(shortest_path))
+  mutate(shortest_path = factor(shortest_path_given_opts)) %>%
+  select(-starts_with("shortest_path_given"), -two_correct_options) %>%
+  group_by(shortest_path, startpoint_id, endpoint_id, opt1_id, opt2_id) %>%
+  summarise(
+    p_bfs_chooses_opt1 = mean(bfs_choice == opt1_id),
+    bfs_visits = mean(bfs_n_visits_total),
+    .groups = "drop"
+  )
 
 behavior <- here(
-  "data", "simulated-model-behaviors",
+  "data", "simulated_model_behaviors",
   str_c("sim_nav_", this_true_model, "_confusion.csv")
 ) %>%
   read_csv(show_col_types = FALSE) %>%
@@ -70,18 +73,14 @@ behavior <- here(
     correct_choice,
     sub_choice = simulated_choice
   ) %>%
-  mutate(shortest_path = factor(shortest_path)) %>%
-  left_join(
-    option_distances,
-    by = join_by(shortest_path, startpoint_id, endpoint_id, opt1_id, opt2_id)
-  )
+  mutate(shortest_path = factor(shortest_path))
 
 
 #### Fit parameters ####
 
 # Define params for objective function
-these_params <- "softmax_temperature"
-this_obj_fun <- obj_fun_ideal_obs
+these_params <- "search_threshold"
+this_obj_fun <- obj_fun_bfs
 
 tic("Total model-fitting time")
 
@@ -91,10 +90,11 @@ out <- run_optim(
   param_guesses = runif(length(these_params), -10, 10),
   param_names = these_params,
   # Supply arguments to objective function
+  bfs_predictions = bfs_forward_sims,
   choice_data = behavior,
   # Additional arguments because this is a 1-dim optimization problem
   method = "Brent",
-  lower = -5, upper = 0
+  lower = 0, upper = 16
 )
 
 toc()

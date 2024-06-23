@@ -12,7 +12,7 @@
 #SBATCH --output=fit_model_sr_true_model_ideal_obs_sub_%a.out
 #SBATCH --array=1-500
 
-workflow_name="model-confusion"
+workflow_name="netnav_05_model_confusion"
 
 
 ### Boilerplate setup
@@ -44,6 +44,6 @@ done
 
 ### Run script
 
-cd ${here}/code/${workflow_name}/fitting-scripts/
+cd ${here}/code/${workflow_name}/fitting_scripts/
 Rscript confusion_sr.R ideal_obs
 
