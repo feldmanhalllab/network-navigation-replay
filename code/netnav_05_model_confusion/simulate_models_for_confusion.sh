@@ -1,6 +1,6 @@
 #! /bin/bash
 
-workflow_name="model-confusion"
+workflow_name="netnav_05_model_confusion"
 
 ### Boilerplate setup
 

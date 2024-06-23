@@ -21,6 +21,8 @@ To do this, we'll perform a "model confusion" analysis. The idea is that we'll u
 # Setup
 
 ```{r libraries}
+workflow_name <- "netnav_05_model_confusion"
+
 library(tidyverse)
 library(here)
 library(patchwork)
@@ -41,14 +43,14 @@ create_path <- function(this_path) {
 }
 
 if (knitting) {
-  here("outputs", "model-confusion") %>%
+  here("outputs", workflow_name) %>%
     create_path()
 }
 ```
 
 ```{r load-data}
 bfs_backward_sims <- here(
-  "data", "bfs-sims", "bfs_sims_learned_reverse.csv"
+  "data", "bfs_sims", "bfs_sims_learned_backward.csv"
 ) %>%
   read_csv(show_col_types = FALSE) %>%
   filter(
@@ -67,7 +69,7 @@ bfs_backward_sims <- here(
     .groups = "drop"
   )
 
-bfs_forward_sims <- here("data", "bfs-sims", "bfs_sims_learned.csv") %>%
+bfs_forward_sims <- here("data", "bfs_sims", "bfs_sims_learned_forward.csv") %>%
   read_csv(show_col_types = FALSE) %>%
   filter(
     shortest_path_given_opts == shortest_path_given_start_end,
@@ -85,7 +87,7 @@ bfs_forward_sims <- here("data", "bfs-sims", "bfs_sims_learned.csv") %>%
     .groups = "drop"
   )
 
-nav_trials <- here("data", "clean-data", "study1_message_passing.csv") %>%
+nav_trials <- here("data", "clean_data", "study1_message_passing.csv") %>%
   read_csv(show_col_types = FALSE) %>%
   filter(
     two_correct_options == FALSE,
@@ -108,7 +110,7 @@ nav_trials <- here("data", "clean-data", "study1_message_passing.csv") %>%
   # of trials, i.e., a distance of 8
   mutate(across(c(opt1_distance, opt2_distance), ~replace_na(.x, 8)))
 
-adjlist <- here("data", "clean-data", "adjlist_learned.csv") %>%
+adjlist <- here("data", "clean_data", "adjlist_learned.csv") %>%
   read_csv(show_col_types = FALSE)
 
 transmat <- adjlist %>%
@@ -121,7 +123,7 @@ transmat <- adjlist %>%
 ```
 
 ```{r load-params}
-params <- here("data", "param-fits") %>%
+params <- here("data", "param_fits") %>%
   fs::dir_ls(
     recurse = 1,
     regexp = str_c(
@@ -278,9 +280,7 @@ plot_params_bfs_backward
 
 if (knitting) {
   ggsave(
-    filename = here(
-      "outputs", "model-confusion", "bfs_backward_param_dist.pdf"
-    ),
+    filename = here("outputs", workflow_name, "bfs_backward_param_dist.pdf"),
     plot = plot_params_bfs_backward,
     width = 5, height = 2.5,
     units = "in", dpi = 300
@@ -289,7 +289,7 @@ if (knitting) {
   sim_behav_bfs_backward %>%
     write_csv(
       here(
-        "data", "simulated-model-behaviors",
+        "data", "simulated_model_behaviors",
         "sim_nav_bfs_backward_confusion.csv"
       )
     )
@@ -388,9 +388,7 @@ plot_params_bfs_forward
 
 if (knitting) {
   ggsave(
-    filename = here(
-      "outputs", "model-confusion", "bfs_forward_param_dist.pdf"
-    ),
+    filename = here("outputs", workflow_name, "bfs_forward_param_dist.pdf"),
     plot = plot_params_bfs_forward,
     width = 5, height = 2.5,
     units = "in", dpi = 300
@@ -399,7 +397,7 @@ if (knitting) {
   sim_behav_bfs_forward %>%
     write_csv(
       here(
-        "data", "simulated-model-behaviors",
+        "data", "simulated_model_behaviors",
         "sim_nav_bfs_forward_confusion.csv"
       )
     )
@@ -489,9 +487,7 @@ plot_params_ideal_obs
 
 if (knitting) {
   ggsave(
-    filename = here(
-      "outputs", "model-confusion", "ideal_obs_param_dist.pdf"
-    ),
+    filename = here("outputs", workflow_name, "ideal_obs_param_dist.pdf"),
     plot = plot_params_ideal_obs,
     width = 5, height = 2.5,
     units = "in", dpi = 300
@@ -500,7 +496,7 @@ if (knitting) {
   sim_behav_ideal_obs %>%
     write_csv(
       here(
-        "data", "simulated-model-behaviors",
+        "data", "simulated_model_behaviors",
         "sim_nav_ideal_obs_confusion.csv"
       )
     )
@@ -668,9 +664,7 @@ plot_params_sr
 
 if (knitting) {
   ggsave(
-    filename = here(
-      "outputs", "model-confusion", "sr_param_dist.pdf"
-    ),
+    filename = here("outputs", workflow_name, "sr_param_dist.pdf"),
     plot = plot_params_sr,
     width = 5, height = 2.5,
     units = "in", dpi = 300
@@ -679,7 +673,7 @@ if (knitting) {
   sim_behav_sr %>%
     write_csv(
       here(
-        "data", "simulated-model-behaviors",
+        "data", "simulated_model_behaviors",
         "sim_nav_sr_confusion.csv"
       )
     )
