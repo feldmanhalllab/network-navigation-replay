@@ -1,7 +1,7 @@
 #### Initialize ####
 
 run_on_cluster <- TRUE
-this_true_model <- "ideal_obs"
+this_true_model <- "bfs_backward"
 
 # Keep dependencies to a minimum
 library(tidyverse)
@@ -10,7 +10,7 @@ library(tictoc)
 
 # Load in utils
 source(here("code", "utils", "modeling_utils.R"))
-source(here("code", "fit-params", "objective_functions.R"))
+source(here("code", "netnav_04_fit_params", "objective_functions.R"))
 
 create_path <- function(this_path) {
   if (!dir.exists(this_path)) {
@@ -18,7 +18,7 @@ create_path <- function(this_path) {
   }
 }
 
-save_results_to <- here("data", "param-recovery", "ideal-obs-no-lapse", "")
+save_results_to <- here("data", "param_recovery", "bfs_backward_no_lapse", "")
 
 if (run_on_cluster) {
   # Get args from shell script and SLURM environment
@@ -41,8 +41,25 @@ if (run_on_cluster) {
 
 #### Load/tidy data ####
 
+bfs_backward_sims <- here(
+  "data", "bfs_sims", "bfs_sims_learned_backward.csv"
+) %>%
+  read_csv(show_col_types = FALSE) %>%
+  filter(
+    shortest_path_given_opts == shortest_path_given_start_end,
+    two_correct_options == FALSE
+  ) %>%
+  mutate(shortest_path = factor(shortest_path_given_opts)) %>%
+  select(-starts_with("shortest_path_given"), -two_correct_options) %>%
+  group_by(shortest_path, startpoint_id, endpoint_id, opt1_id, opt2_id) %>%
+  summarise(
+    p_bfs_chooses_opt1 = mean(bfs_choice == opt1_id),
+    bfs_visits = mean(bfs_n_visits_total),
+    .groups = "drop"
+  )
+
 behavior <- here(
-  "data", "simulated-model-behaviors",
+  "data", "simulated_model_behaviors",
   str_c("sim_nav_", this_true_model, "_no_lapse.csv")
 ) %>%
   read_csv(show_col_types = FALSE) %>%
@@ -52,8 +69,7 @@ behavior <- here(
     startpoint_id, endpoint_id,
     opt1_id, opt2_id,
     correct_choice,
-    sub_choice = simulated_choice,
-    opt1_distance, opt2_distance
+    sub_choice = simulated_choice
   ) %>%
   mutate(shortest_path = factor(shortest_path))
 
@@ -61,8 +77,8 @@ behavior <- here(
 #### Fit parameters ####
 
 # Define params for objective function
-these_params <- "softmax_temperature"
-this_obj_fun <- obj_fun_ideal_obs
+these_params <- "search_threshold"
+this_obj_fun <- obj_fun_bfs
 
 tic("Total model-fitting time")
 
@@ -72,10 +88,11 @@ out <- run_optim(
   param_guesses = runif(length(these_params), -10, 10),
   param_names = these_params,
   # Supply arguments to objective function
+  bfs_predictions = bfs_backward_sims,
   choice_data = behavior,
   # Additional arguments because this is a 1-dim optimization problem
   method = "Brent",
-  lower = -5, upper = 0
+  lower = 0, upper = 15
 )
 
 toc()

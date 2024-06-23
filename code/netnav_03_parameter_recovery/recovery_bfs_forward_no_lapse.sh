@@ -12,7 +12,7 @@
 #SBATCH --output=recovery_bfs_forward_no_lapse_sub_%a.out
 #SBATCH --array=1-500
 
-workflow_name="parameter-recovery"
+workflow_name="netnav_03_parameter_recovery"
 
 
 ### Boilerplate setup

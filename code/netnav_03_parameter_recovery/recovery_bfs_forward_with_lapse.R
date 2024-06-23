@@ -17,7 +17,7 @@ create_path <- function(this_path) {
   }
 }
 
-save_results_to <- here("data", "param-recovery", "bfs-forward-with-lapse", "")
+save_results_to <- here("data", "param_recovery", "bfs_forward_with_lapse", "")
 
 if (run_on_cluster) {
   # Get args from shell script and SLURM environment
@@ -41,7 +41,7 @@ if (run_on_cluster) {
 #### Load/tidy data ####
 
 bfs_forward_sims <- here(
-  "data", "bfs-sims", "bfs_sims_learned.csv"
+  "data", "bfs_sims", "bfs_sims_learned_forward.csv"
 ) %>%
   read_csv(show_col_types = FALSE) %>%
   filter(
@@ -58,7 +58,7 @@ bfs_forward_sims <- here(
   )
 
 behavior <- here(
-  "data", "simulated-model-behaviors",
+  "data", "simulated_model_behaviors",
   str_c("sim_nav_", this_true_model, "_with_lapse.csv")
 ) %>%
   read_csv(show_col_types = FALSE) %>%
