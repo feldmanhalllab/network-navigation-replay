@@ -1,0 +1,2 @@
+param_name,param_value,optim_value,convergence
+softmax_temperature,-4.999999870437376,0.24302622263159857,converged
