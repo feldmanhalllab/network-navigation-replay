@@ -1,0 +1,805 @@
+---
+title: "Generate SR 'observations'"
+output:
+  html_document:
+    code_download: true
+    code_folding: hide
+    toc: true
+    toc_float:
+      collapsed: true
+---
+
+# Rationale
+
+In this work, we often want to simulate an "asymptotic" Successor Representation (SR). However, when using a delta-rule updating mechanism to "learn from observation", there will inevitably be some small amount of stochasticity associated with the choice of observations.
+
+We can't get rid of this stochasticity entirely, but we should at least try to minimize its impact on (e.g.) parameter-fitting. To do this, we'll generate/save a standard set of "observations" that we'll use to consistently generate an approximately-asymptotic SR.
+
+```{r libraries}
+library(tidyverse)
+library(here)
+library(patchwork)
+
+source(here("code", "utils", "ggplot_themes.R"))
+source(here("code", "utils", "kable_utils.R"))
+source(here("code", "utils", "modeling_utils.R"))
+source(here("code", "utils", "representation_utils.R"))
+source(here("code", "utils", "unicode_greek.R"))
+
+knitting <- knitr::is_html_output()
+
+create_path <- function(this_path) {
+  if (!dir.exists(this_path)) {
+    dir.create(this_path, recursive = TRUE)
+  }
+}
+
+if (knitting) {
+  here("outputs", "simulate-sr") %>%
+    create_path()
+}
+```
+
+```{r load-data}
+adjlist <- here("data", "clean-data", "adjlist_learned.csv") %>%
+  read_csv(show_col_types = FALSE)
+
+transmat <- adjlist %>%
+  group_by(from) %>%
+  mutate(edge = edge / sum(edge)) %>%
+  ungroup() %>%
+  pivot_wider(names_from = to, values_from = edge) %>%
+  column_to_rownames("from") %>%
+  as.matrix()
+
+nav_trials <- here("data", "clean-data", "study1_message_passing.csv") %>%
+  read_csv(show_col_types = FALSE) %>%
+  filter(
+    two_correct_options == FALSE,
+    shortest_path_given_opts == shortest_path_given_start_end
+  ) %>%
+  mutate(shortest_path = factor(shortest_path_given_opts)) %>%
+  filter(sub_id == 1) %>%
+  select(
+    shortest_path,
+    startpoint_id, endpoint_id,
+    opt1_id, opt2_id,
+    correct_choice,
+    opt1_distance = dist_opt1,
+    opt2_distance = dist_opt2
+  ) %>%
+  arrange(shortest_path, startpoint_id, endpoint_id, opt1_id, opt2_id)
+```
+
+
+# Analytic SR
+
+In past research, people have tried to get around this problem by using the following closed-form analytic solution:
+
+$M = (I - \gamma T)^{-1}$
+
+where $M$ is the SR matrix, $I$ is the identity matrix, $\gamma$ is the successor discount, $T$ is the true transition matrix, and where $X^{-1}$ refers to the matrix inverse.
+
+Note that the "out-of-the-box" SR produces a matrix of counts (more technically, "expected discounted future visitations", but this is quite the mouthful). Specifically, the counts quantify "if I start at state X and take a random walk of length L, how many times should I expect to end up in state Y?" The term $L$ can be thought of as a "lookahead" horizon, and is related to $\gamma$ through the following equations: $L = \frac{1}{1-\gamma}$ and $\gamma = 1 - \frac{1}{L}$. Therefore, the SR can be normalized as a matrix of probabilities: $M_{\text{probabilities}} \leftarrow M_{\text{counts}} \times \frac{1}{L}$, which quantify "if I start at state X and take a random walk of length L, what's the probability of me ending up in state Y?".
+
+In a moment, we'll verify that the count and probability matrices contain the same information and result in identical predicted behaviors in the social navigation task.
+
+```{r sim-analytic-sr-rep}
+sr_analytic_counts <- map_dfr(
+  .x = round(seq(0.1, 0.9, 0.1), 2),
+  .f = ~build_successor_analytically(
+    transition_matrix = transmat,
+    successor_horizon = .x,
+    normalize = FALSE
+  )
+)
+
+sr_analytic_probs <- map_dfr(
+  .x = round(seq(0.1, 0.9, 0.1), 2),
+  .f = ~build_successor_analytically(
+    transition_matrix = transmat,
+    successor_horizon = .x,
+    normalize = TRUE
+  )
+)
+```
+
+While it's nice to have some theoretical guarantees about asymptotic representation, as well as an elegant closed-form equation, this is far from being an assumption-free solution. Specifically, the analytic solution assumes that the strongest contributor to representation is the identity matrix (i.e., state X transitioning to itself). This becomes clearer when writing out the analytic solution as a summation:
+
+$M = \sum_{k=0}^\infty \gamma^k T^k$
+
+As the $\gamma^k$ term specifies the exponential discount/decay factor, $\gamma^0 T^0 = I$ is quite literally the most heavily-weighted term in the summation.
+
+We can see this pretty clearly when plotting the predicted representations:
+
+```{r plot-analytic-sr-rep}
+#| fig.width=8, fig.height=6
+
+plot_sr_analytic_counts <- sr_analytic_counts %>%
+  mutate(
+    across(c(from, to), factor),
+    from = fct_rev(from),
+    sr_gamma = str_c(unicode_greek["gamma"], "=", sr_gamma)
+  ) %>%
+  ggplot(aes(x=to, y=from, fill=sr_value)) +
+  theme_heatmap() +
+  facet_wrap(~sr_gamma) +
+  geom_tile() +
+  scale_fill_viridis_c(name = "SR counts") +
+  coord_fixed() +
+  ggtitle("Count matrix") +
+  theme(
+    legend.position = "bottom",
+    axis.text.x = element_blank(),
+    axis.text.y = element_blank(),
+    axis.ticks = element_blank()
+  )
+
+plot_sr_analytic_probs <- sr_analytic_probs %>%
+  mutate(
+    across(c(from, to), factor),
+    from = fct_rev(from),
+    sr_gamma = str_c(unicode_greek["gamma"], "=", sr_gamma)
+  ) %>%
+  ggplot(aes(x=to, y=from, fill=sr_value)) +
+  theme_heatmap() +
+  facet_wrap(~sr_gamma) +
+  geom_tile() +
+  scale_fill_viridis_c(name = "SR probabilities") +
+  coord_fixed() +
+  ggtitle("Probability matrix") +
+  theme(
+    legend.position = "bottom",
+    axis.text.x = element_blank(),
+    axis.text.y = element_blank(),
+    axis.ticks = element_blank()
+  )
+
+plot_sr_analytic_rep <- wrap_plots(
+  plot_sr_analytic_counts, plot_sr_analytic_probs,
+  nrow = 1
+) &
+  plot_annotation(
+    title = "Analytic SR",
+    theme = theme(
+      plot.title = element_text(hjust = 0.5),
+      legend.position = "bottom"
+    )
+  )
+
+plot_sr_analytic_rep
+
+if (knitting) {
+  ggsave(
+    filename = here("outputs", "simulate-sr", "predicted_rep_sr_analytic.pdf"),
+    plot = plot_sr_analytic_rep,
+    width = 8, height = 6,
+    units = "in", dpi = 300,
+    device = cairo_pdf
+  )
+}
+```
+
+At first glance, it looks like the count and probability matrices might contain different information. However, they are fundamentally the same. Let's verify that they make *exactly* the same contributions to behavior when the softmax (inverse) temperature parameter accounts for the fact that the probability matrix is normalized by the lookahead. Here, the temperature for the count matrix is $10$, and the temperature for the probability matrix is $10L = 10 \times \frac{1}{1-\gamma}$.
+
+```{r sim-analytic-sr-nav}
+nav_sr_analytic_counts <- expand_grid(
+  sr_gamma = round(seq(0.1, 0.9, 0.1), 2),
+  nav_trials
+) %>%
+  left_join(
+    sr_analytic_counts %>%
+      rename(endpoint_id = to, opt1_id = from, opt1_sr = sr_value),
+    by = join_by(sr_gamma, endpoint_id, opt1_id)
+  ) %>%
+  left_join(
+    sr_analytic_counts %>%
+      rename(endpoint_id = to, opt2_id = from, opt2_sr = sr_value),
+    by = join_by(sr_gamma, endpoint_id, opt2_id)
+  ) %>%
+  rowwise() %>%
+  mutate(
+    p_correct = softmax(
+      option_values = c(opt1_sr, opt2_sr),
+      option_chosen = if_else(opt1_id == correct_choice, 1, 2),
+      temperature = 10,
+      use_inverse_temperature = TRUE
+    )
+  ) %>%
+  ungroup()
+
+nav_sr_analytic_probs <- expand_grid(
+  sr_gamma = round(seq(0.1, 0.9, 0.1), 2),
+  nav_trials
+) %>%
+  left_join(
+    sr_analytic_probs %>%
+      rename(endpoint_id = to, opt1_id = from, opt1_sr = sr_value),
+    by = join_by(sr_gamma, endpoint_id, opt1_id)
+  ) %>%
+  left_join(
+    sr_analytic_probs %>%
+      rename(endpoint_id = to, opt2_id = from, opt2_sr = sr_value),
+    by = join_by(sr_gamma, endpoint_id, opt2_id)
+  ) %>%
+  rowwise() %>%
+  mutate(
+    lookahead = 1/(1-sr_gamma),
+    p_correct = softmax(
+      option_values = c(opt1_sr, opt2_sr),
+      option_chosen = if_else(opt1_id == correct_choice, 1, 2),
+      temperature = 10 * lookahead,
+      use_inverse_temperature = TRUE
+    )
+  ) %>%
+  ungroup()
+```
+
+We can see that there's a perfect correlation between the behavioral predictions made by the count- and probability-based matrices.
+
+```{r corr-analytic-sr-nav}
+left_join(
+  nav_sr_analytic_counts %>%
+    select(
+      sr_gamma, shortest_path,
+      startpoint_id, endpoint_id,
+      opt1_id, opt2_id,
+      p_correct_counts = p_correct
+    ),
+  nav_sr_analytic_probs %>%
+    select(
+      sr_gamma, shortest_path,
+      startpoint_id, endpoint_id,
+      opt1_id, opt2_id,
+      p_correct_probs = p_correct
+    ),
+  by = join_by(
+    sr_gamma, shortest_path, startpoint_id, endpoint_id, opt1_id, opt2_id
+  )
+) %>%
+  group_by(sr_gamma) %>%
+  nest() %>%
+  mutate(
+    corr = map_dbl(
+      .x = data,
+      .f = ~with(.x, cor(p_correct_counts, p_correct_probs))
+    )
+  ) %>%
+  ungroup() %>%
+  select(-data) %>%
+  kable_custom(
+    captions = c(
+      "Correlations between predicted behavior from analytic SRs",
+      "(counts vs probabilities)"
+    )
+  )
+```
+
+And just to visually confirm, we can plot out the model predictions to confirm that the "monotonic relationship" being indexed by the correlation is actually "identity".
+
+```{r plot-analytic-sr-nav}
+#| fig.width=6, fig.height=8
+
+plot_sr_analytic_nav <- left_join(
+  nav_sr_analytic_counts %>%
+    select(
+      sr_gamma, shortest_path,
+      startpoint_id, endpoint_id,
+      opt1_id, opt2_id,
+      p_correct_counts = p_correct
+    ),
+  nav_sr_analytic_probs %>%
+    select(
+      sr_gamma, shortest_path,
+      startpoint_id, endpoint_id,
+      opt1_id, opt2_id,
+      p_correct_probs = p_correct
+    ),
+  by = join_by(
+    sr_gamma, shortest_path, startpoint_id, endpoint_id, opt1_id, opt2_id
+  )
+) %>%
+  pivot_longer(
+    cols = starts_with("p_correct_"),
+    names_to = "method",
+    values_to = "p_correct"
+  ) %>%
+  mutate(
+    method = str_remove(method, "p_correct_"),
+    shortest_path = str_c("Shortest path distance ", shortest_path),
+    sr_gamma = str_c(unicode_greek["gamma"], "=", sr_gamma)
+  ) %>%
+  ggplot(aes(x=method, y=p_correct)) +
+  theme_custom() +
+  facet_grid(
+    rows = vars(sr_gamma),
+    cols = vars(shortest_path)
+  ) +
+  geom_line(
+    aes(group = interaction(startpoint_id, endpoint_id, opt1_id, opt2_id)),
+    alpha = 0.1
+  ) +
+  scale_x_discrete(
+    name = "Normalization method",
+    labels = c("counts"="Counts", "probs"="Probabilities")
+  ) +
+  scale_y_continuous(
+    name = "Accuracy",
+    labels = scales::percent,
+    breaks = seq(0.5, 1, 0.25)
+  ) +
+  ggtitle("Predicted navigation accuracy: Analytic SR")
+
+plot_sr_analytic_nav
+
+if (knitting) {
+  ggsave(
+    filename = here("outputs", "simulate-sr", "predicted_nav_sr_analytic.pdf"),
+    plot = plot_sr_analytic_nav,
+    width = 6, height = 8,
+    units = "in", dpi = 300,
+    device = cairo_pdf
+  )
+}
+```
+
+
+# Delta-rule SR
+
+How does the "delta-rule" version of the SR compare? Let's generate a bunch of simulated "observations". Random walks can (and often do) get stuck within clusters/communities, so since we're explicitly interested in asymptotic representations, let's simulate a bunch of "paired associates" such that we cycle through all pairs (in random order) before cycling through all pairs again.
+
+Note that we'll generate more observations than we strictly need, just so that we have them on hand. Note also that we'll set a random seed in the next code cell to ensure that we always generate the same observations.
+
+```{r generate-observations}
+set.seed(sum(utf8ToInt("Watch them, take it on back, do the rewind")))
+
+obs_for_sr_delta_rule <- expand_grid(
+  iter = 1:5000,
+  adjlist %>%
+    filter(edge == 1) %>%
+    select(from, to)
+) %>%
+  group_by(iter) %>%
+  slice_sample(prop = 1) %>%
+  ungroup()
+
+if (knitting) {
+  here("data", "sr-obs") %>%
+    create_path()
+  
+  obs_for_sr_delta_rule %>%
+    write_csv(file = here("data", "sr-obs", "sim_obs_for_sr.csv"))
+}
+```
+
+Let's simulate SRs using a different number of observations each time. Note that we're using "bidirectional" updating, meaning that observing the pair A+B triggers a learning update for both A and B.
+
+```{r sim-delta-rule-sr-rep}
+sr_delta_100 <- map_dfr(
+  .x = round(seq(0.1, 0.9, 0.1), 2),
+  .f = ~build_successor_td_0(
+    successor_matrix = diag(nrow = 13, ncol = 13),
+    observation_matrix = obs_for_sr_delta_rule %>%
+      filter(iter <= 100) %>%
+      select(from, to) %>%
+      as.matrix(),
+    sr_alpha = 0.1,
+    sr_gamma = .x,
+    bidirectional = TRUE
+  )
+)
+
+sr_delta_5000 <- map_dfr(
+  .x = round(seq(0.1, 0.9, 0.1), 2),
+  .f = ~build_successor_td_0(
+    successor_matrix = diag(nrow = 13, ncol = 13),
+    observation_matrix = obs_for_sr_delta_rule %>%
+      filter(iter <= 5000) %>%
+      select(from, to) %>%
+      as.matrix(),
+    sr_alpha = 0.1,
+    sr_gamma = .x,
+    bidirectional = TRUE
+  )
+)
+```
+
+It seems from the predicted representations that there isn't much of a difference between using 100 observations vs 5000 observations.
+
+```{r plot-delta-rule-sr-rep}
+#| fig.width=8, fig.height=6
+
+plot_sr_delta_100 <- sr_delta_100 %>%
+  mutate(
+    across(c(from, to), factor),
+    from = fct_rev(from),
+    sr_gamma = str_c(unicode_greek["gamma"], "=", sr_gamma)
+  ) %>%
+  ggplot(aes(x=to, y=from, fill=sr_value)) +
+  theme_heatmap() +
+  facet_wrap(~sr_gamma) +
+  geom_tile() +
+  scale_fill_viridis_c(name = "SR counts", limits = c(0, 2.5)) +
+  coord_fixed() +
+  ggtitle("100 observations") +
+  theme(
+    legend.position = "bottom",
+    axis.text.x = element_blank(),
+    axis.text.y = element_blank(),
+    axis.ticks = element_blank()
+  )
+
+plot_sr_delta_5000 <- sr_delta_5000 %>%
+  mutate(
+    across(c(from, to), factor),
+    from = fct_rev(from),
+    sr_gamma = str_c(unicode_greek["gamma"], "=", sr_gamma)
+  ) %>%
+  ggplot(aes(x=to, y=from, fill=sr_value)) +
+  theme_heatmap() +
+  facet_wrap(~sr_gamma) +
+  geom_tile() +
+  scale_fill_viridis_c(name = "SR counts", limits = c(0, 2.5)) +
+  coord_fixed() +
+  ggtitle("5000 observations") +
+  theme(
+    legend.position = "bottom",
+    axis.text.x = element_blank(),
+    axis.text.y = element_blank(),
+    axis.ticks = element_blank()
+  )
+
+plot_sr_delta_rep <- wrap_plots(
+  plot_sr_delta_100, plot_sr_delta_5000,
+  nrow = 1, guides = "collect"
+) &
+  plot_annotation(
+    title = "Delta-rule SR",
+    theme = theme(
+      plot.title = element_text(hjust = 0.5),
+      legend.position = "bottom"
+    )
+  )
+
+plot_sr_delta_rep
+
+if (knitting) {
+  ggsave(
+    filename = here(
+      "outputs", "simulate-sr", "predicted_rep_sr_delta_rule.pdf"
+    ),
+    plot = plot_sr_delta_rep,
+    width = 8, height = 6,
+    units = "in", dpi = 300,
+    device = cairo_pdf
+  )
+}
+```
+
+We can also check whether the 100- vs 5000-observation SRs make essentially the same predictions about behavior.
+
+```{r sim-delta-rule-sr-nav}
+nav_sr_delta_100 <- expand_grid(
+  sr_gamma = round(seq(0.1, 0.9, 0.1), 2),
+  nav_trials
+) %>%
+  left_join(
+    sr_delta_100 %>%
+      select(sr_gamma, endpoint_id = to, opt1_id = from, opt1_sr = sr_value),
+    by = join_by(sr_gamma, endpoint_id, opt1_id)
+  ) %>%
+  left_join(
+    sr_delta_100 %>%
+      select(sr_gamma, endpoint_id = to, opt2_id = from, opt2_sr = sr_value),
+    by = join_by(sr_gamma, endpoint_id, opt2_id)
+  ) %>%
+  rowwise() %>%
+  mutate(
+    p_correct = softmax(
+      option_values = c(opt1_sr, opt2_sr),
+      option_chosen = if_else(opt1_id == correct_choice, 1, 2),
+      temperature = 10,
+      use_inverse_temperature = TRUE
+    )
+  ) %>%
+  ungroup()
+
+nav_sr_delta_5000 <- expand_grid(
+  sr_gamma = round(seq(0.1, 0.9, 0.1), 2),
+  nav_trials
+) %>%
+  left_join(
+    sr_delta_5000 %>%
+      select(sr_gamma, endpoint_id = to, opt1_id = from, opt1_sr = sr_value),
+    by = join_by(sr_gamma, endpoint_id, opt1_id)
+  ) %>%
+  left_join(
+    sr_delta_5000 %>%
+      select(sr_gamma, endpoint_id = to, opt2_id = from, opt2_sr = sr_value),
+    by = join_by(sr_gamma, endpoint_id, opt2_id)
+  ) %>%
+  rowwise() %>%
+  mutate(
+    p_correct = softmax(
+      option_values = c(opt1_sr, opt2_sr),
+      option_chosen = if_else(opt1_id == correct_choice, 1, 2),
+      temperature = 10,
+      use_inverse_temperature = TRUE
+    )
+  ) %>%
+  ungroup()
+```
+
+We see that there are high correlations between the predictions made by the 100- vs 5000-observation SRs:
+
+```{r corr-delta-rule-sr-nav}
+left_join(
+  nav_sr_delta_100 %>%
+    select(
+      sr_gamma, shortest_path,
+      startpoint_id, endpoint_id,
+      opt1_id, opt2_id,
+      sr_100 = p_correct
+    ),
+  nav_sr_delta_5000 %>%
+    select(
+      sr_gamma, shortest_path,
+      startpoint_id, endpoint_id,
+      opt1_id, opt2_id,
+      sr_5000 = p_correct
+    ),
+  by = join_by(
+    sr_gamma, shortest_path, startpoint_id, endpoint_id, opt1_id, opt2_id
+  )
+) %>%
+  group_by(sr_gamma) %>%
+  nest() %>%
+  mutate(
+    corr = map_dbl(.x = data, .f = ~with(.x, cor(sr_100, sr_5000)))
+  ) %>%
+  ungroup() %>%
+  select(-data) %>%
+  kable_custom(
+    captions = c(
+      "Correlations between predicted behavior from delta-rule SRs",
+      "(100 vs 5000 observations)"
+    )
+  )
+```
+
+When we plot out the model predictions, we see that the two delta-rule SRs are making essentially the same predictions.
+
+```{r plot-delta-rule-sr-nav}
+#| fig.width=6, fig.height=8
+
+plot_sr_delta_nav <- left_join(
+  nav_sr_delta_100 %>%
+    select(
+      sr_gamma, shortest_path,
+      startpoint_id, endpoint_id,
+      opt1_id, opt2_id,
+      p_correct_100 = p_correct
+    ),
+  nav_sr_delta_5000 %>%
+    select(
+      sr_gamma, shortest_path,
+      startpoint_id, endpoint_id,
+      opt1_id, opt2_id,
+      p_correct_5000 = p_correct
+    ),
+  by = join_by(
+    sr_gamma, shortest_path, startpoint_id, endpoint_id, opt1_id, opt2_id
+  )
+) %>%
+  pivot_longer(
+    cols = starts_with("p_correct_"),
+    names_to = "n_obs",
+    values_to = "p_correct"
+  ) %>%
+  mutate(
+    n_obs = str_remove(n_obs, "p_correct_"),
+    shortest_path = str_c("Shortest path distance ", shortest_path),
+    sr_gamma = str_c(unicode_greek["gamma"], "=", sr_gamma)
+  ) %>%
+  ggplot(aes(x=n_obs, y=p_correct)) +
+  theme_custom() +
+  facet_grid(
+    rows = vars(sr_gamma),
+    cols = vars(shortest_path)
+  ) +
+  geom_line(
+    aes(group = interaction(startpoint_id, endpoint_id, opt1_id, opt2_id)),
+    alpha = 0.1
+  ) +
+  scale_x_discrete(name = "# Observations") +
+  scale_y_continuous(
+    name = "Accuracy",
+    labels = scales::percent,
+    breaks = seq(0.5, 1, 0.25)
+  ) +
+  ggtitle("Predicted navigation accuracy: Delta-rule SR")
+
+plot_sr_delta_nav
+
+if (knitting) {
+  ggsave(
+    filename = here(
+      "outputs", "simulate-sr", "predicted_nav_sr_delta_rule.pdf"
+    ),
+    plot = plot_sr_delta_nav,
+    width = 6, height = 8,
+    units = "in", dpi = 300,
+    device = cairo_pdf
+  )
+}
+```
+
+
+# Analytic vs Delta-rule SRs
+
+Finally, let's compare the predictions made by the analytic and delta-rule SRs.
+
+We can see that the predicted behavior from the delta-rule SR (learned from 100 observations) correlates very strongly with predicted behavior from the asymptotic SR.
+
+```{r corr-analytic-delta-sr}
+left_join(
+  nav_sr_delta_100 %>%
+    select(sr_gamma:opt2_id, sr_100 = p_correct),
+  nav_sr_analytic_counts %>%
+    select(sr_gamma:opt2_id, sr_analytic = p_correct),
+  by = join_by(
+    sr_gamma, shortest_path, startpoint_id, endpoint_id, opt1_id, opt2_id
+  )
+) %>%
+  group_by(sr_gamma) %>%
+  nest() %>%
+  mutate(
+    corr = map_dbl(.x = data, .f = ~with(.x, cor(sr_100, sr_analytic)))
+  ) %>%
+  ungroup() %>%
+  select(-data) %>%
+  kable_custom(
+    captions = c(
+      "Correlations between predicted behavior",
+      "(delta-rule vs analytic SRs)"
+    )
+  )
+```
+
+However, when we plot out the model predictions, we can see that there are very strong divergences in what behaviors the analytic vs delta-rule methods predict.
+
+```{r plot-analytic-delta-sr}
+#| fig.width=6, fig.height=8
+
+plot_sr_nav_comparison_1 <- left_join(
+  nav_sr_analytic_counts %>%
+    select(
+      sr_gamma, shortest_path,
+      startpoint_id, endpoint_id,
+      opt1_id, opt2_id,
+      p_correct_analytic = p_correct
+    ),
+  nav_sr_delta_100 %>%
+    select(
+      sr_gamma, shortest_path,
+      startpoint_id, endpoint_id,
+      opt1_id, opt2_id,
+      p_correct_delta = p_correct
+    ),
+  by = join_by(
+    sr_gamma, shortest_path, startpoint_id, endpoint_id, opt1_id, opt2_id
+  )
+) %>%
+  pivot_longer(
+    cols = starts_with("p_correct_"),
+    names_to = "method",
+    values_to = "p_correct"
+  ) %>%
+  mutate(
+    method = str_remove(method, "p_correct_"),
+    shortest_path = str_c("Shortest path distance ", shortest_path),
+    sr_gamma = str_c(unicode_greek["gamma"], "=", sr_gamma)
+  ) %>%
+  ggplot(aes(x=method, y=p_correct)) +
+  theme_custom() +
+  facet_grid(
+    rows = vars(sr_gamma),
+    cols = vars(shortest_path)
+  ) +
+  geom_line(
+    aes(group = interaction(startpoint_id, endpoint_id, opt1_id, opt2_id)),
+    alpha = 0.1
+  ) +
+  scale_x_discrete(
+    name = "Method",
+    labels = c("analytic"="Analytic", "delta"="Delta-rule")
+  ) +
+  scale_y_continuous(
+    name = "Accuracy",
+    labels = scales::percent,
+    breaks = seq(0.5, 1, 0.25)
+  ) +
+  ggtitle("Predicted navigation accuracy")
+
+plot_sr_nav_comparison_1
+
+if (knitting) {
+  ggsave(
+    filename = here(
+      "outputs", "simulate-sr", "predicted_nav_sr_comparison_1.pdf"
+    ),
+    plot = plot_sr_nav_comparison_1,
+    width = 6, height = 8,
+    units = "in", dpi = 300,
+    device = cairo_pdf
+  )
+}
+```
+
+We can emphasize this by plotting it in a different way. This highlights that (at least at this softmax temperature) the analytic and delta-rule implementations basically converge at larger values of gamma, but radically diverge at lower values of gamma.
+
+```{r plot-analytic-delta-sr-2}
+#| fig.width=4, fig.height=5
+
+plot_sr_nav_comparison_2 <- left_join(
+  nav_sr_analytic_counts %>%
+    select(
+      sr_gamma, shortest_path,
+      startpoint_id, endpoint_id,
+      opt1_id, opt2_id,
+      p_correct_analytic = p_correct
+    ),
+  nav_sr_delta_100 %>%
+    select(
+      sr_gamma, shortest_path,
+      startpoint_id, endpoint_id,
+      opt1_id, opt2_id,
+      p_correct_delta = p_correct
+    ),
+  by = join_by(
+    sr_gamma, shortest_path, startpoint_id, endpoint_id, opt1_id, opt2_id
+  )
+) %>%
+  pivot_longer(
+    cols = starts_with("p_correct_"),
+    names_to = "method",
+    values_to = "p_correct"
+  ) %>%
+  mutate(
+    method = str_remove(method, "p_correct_"),
+    method = if_else(method == "analytic", "Analytic", "Delta-rule"),
+    sr_gamma = str_c(unicode_greek["gamma"], "=", sr_gamma)
+  ) %>%
+  ggplot(aes(x=shortest_path, y=p_correct, color=method)) +
+  theme_custom() +
+  facet_wrap(~sr_gamma) +
+  geom_hline(yintercept = 0.5, linetype = "dashed") +
+  stat_summary(
+    aes(group = method), geom = "line", fun = mean, linewidth = 1
+  ) +
+  geom_point(alpha = 0.25, show.legend = FALSE) +
+  scale_color_viridis_d(name = "SR:", end = 0.8) +
+  scale_x_discrete(name = "Shortest path distance") +
+  scale_y_continuous(
+    name = "Accuracy",
+    labels = scales::percent,
+    breaks = seq(0.5, 1, 0.25)
+  ) +
+  ggtitle("Predicted navigation accuracy") +
+  theme(legend.position = "bottom")
+
+plot_sr_nav_comparison_2
+
+if (knitting) {
+  ggsave(
+    filename = here(
+      "outputs", "simulate-sr", "predicted_nav_sr_comparison_2.pdf"
+    ),
+    plot = plot_sr_nav_comparison_2,
+    width = 4, height = 5,
+    units = "in", dpi = 300,
+    device = cairo_pdf
+  )
+}
+```
+

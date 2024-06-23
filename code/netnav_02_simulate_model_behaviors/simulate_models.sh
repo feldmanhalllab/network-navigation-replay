@@ -1,6 +1,6 @@
 #! /bin/bash
 
-workflow_name="simulate-model-behaviors"
+workflow_name="netnav_02_simulate_model_behaviors"
 
 ### Boilerplate setup
 

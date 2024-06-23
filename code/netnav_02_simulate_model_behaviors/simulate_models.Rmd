@@ -21,6 +21,8 @@ Finally, we'll want to simulate behaviors from many agents, so that we can get a
 # Setup
 
 ```{r libraries}
+workflow_name <- "netnav_02_simulate_model_behaviors"
+
 library(tidyverse)
 library(here)
 library(patchwork)
@@ -44,17 +46,17 @@ if (knitting) {
   here("figures") %>%
     create_path()
   
-  here("outputs", "simulate-model-behaviors") %>%
+  here("outputs", workflow_name) %>%
     create_path()
   
-  here("data", "simulated-model-behaviors") %>%
+  here("data", "simulated_model_behaviors") %>%
     create_path()
 }
 ```
 
 ```{r load-data}
 bfs_backward_sims <- here(
-  "data", "bfs-sims", "bfs_sims_learned_reverse.csv"
+  "data", "bfs_sims", "bfs_sims_learned_backward.csv"
 ) %>%
   read_csv(show_col_types = FALSE) %>%
   filter(
@@ -73,7 +75,7 @@ bfs_backward_sims <- here(
     .groups = "drop"
   )
 
-bfs_forward_sims <- here("data", "bfs-sims", "bfs_sims_learned.csv") %>%
+bfs_forward_sims <- here("data", "bfs_sims", "bfs_sims_learned_forward.csv") %>%
   read_csv(show_col_types = FALSE) %>%
   filter(
     shortest_path_given_opts == shortest_path_given_start_end,
@@ -91,7 +93,7 @@ bfs_forward_sims <- here("data", "bfs-sims", "bfs_sims_learned.csv") %>%
     .groups = "drop"
   )
 
-nav_trials <- here("data", "clean-data", "study1_message_passing.csv") %>%
+nav_trials <- here("data", "clean_data", "study1_message_passing.csv") %>%
   read_csv(show_col_types = FALSE) %>%
   filter(
     two_correct_options == FALSE,
@@ -114,7 +116,7 @@ nav_trials <- here("data", "clean-data", "study1_message_passing.csv") %>%
   # of trials, i.e., a distance of 8
   mutate(across(c(opt1_distance, opt2_distance), ~replace_na(.x, 8)))
 
-adjlist <- here("data", "clean-data", "adjlist_learned.csv") %>%
+adjlist <- here("data", "clean_data", "adjlist_learned.csv") %>%
   read_csv(show_col_types = FALSE)
 
 transmat <- adjlist %>%
@@ -199,18 +201,14 @@ plot_bfs_backward_summary
 
 if (knitting) {
   ggsave(
-    filename = here(
-      "outputs", "simulate-model-behaviors", "bfs_backward_trials.pdf"
-    ),
+    filename = here("outputs", workflow_name, "bfs_backward_trials.pdf"),
     plot = plot_bfs_backward_trials,
     width = 6, height = 6,
     units = "in", dpi = 300
   )
   
   ggsave(
-    filename = here(
-      "outputs", "simulate-model-behaviors", "bfs_backward_summary.pdf"
-    ),
+    filename = here("outputs", workflow_name, "bfs_backward_summary.pdf"),
     plot = plot_bfs_backward_summary,
     width = 5, height = 5,
     units = "in", dpi = 300
@@ -257,9 +255,7 @@ plot_bfs_backward_corr
 
 if (knitting) {
   ggsave(
-    filename = here(
-      "outputs", "simulate-model-behaviors", "bfs_backward_corr.pdf"
-    ),
+    filename = here("outputs", workflow_name, "bfs_backward_corr.pdf"),
     plot = plot_bfs_backward_corr,
     width = 8, height = 8,
     units = "in", dpi = 300
@@ -323,9 +319,7 @@ plot_param_dist_bfs_backward
 
 if (knitting) {
   ggsave(
-    filename = here(
-      "outputs", "simulate-model-behaviors", "bfs_backward_param_dist.pdf"
-    ),
+    filename = here("outputs", workflow_name, "bfs_backward_param_dist.pdf"),
     plot = plot_param_dist_bfs_backward,
     width = 5, height = 5,
     units = "in", dpi = 300
@@ -334,7 +328,7 @@ if (knitting) {
   sim_behav_bfs_backward %>%
     write_csv(
       here(
-        "data", "simulated-model-behaviors",
+        "data", "simulated_model_behaviors",
         "sim_nav_bfs_backward_no_lapse.csv"
       )
     )
@@ -414,18 +408,14 @@ plot_bfs_forward_summary
 
 if (knitting) {
   ggsave(
-    filename = here(
-      "outputs", "simulate-model-behaviors", "bfs_forward_trials.pdf"
-    ),
+    filename = here("outputs", workflow_name, "bfs_forward_trials.pdf"),
     plot = plot_bfs_forward_trials,
     width = 6, height = 6,
     units = "in", dpi = 300
   )
   
   ggsave(
-    filename = here(
-      "outputs", "simulate-model-behaviors", "bfs_forward_summary.pdf"
-    ),
+    filename = here("outputs", workflow_name, "bfs_forward_summary.pdf"),
     plot = plot_bfs_forward_summary,
     width = 5, height = 5,
     units = "in", dpi = 300
@@ -472,9 +462,7 @@ plot_bfs_forward_corr
 
 if (knitting) {
   ggsave(
-    filename = here(
-      "outputs", "simulate-model-behaviors", "bfs_forward_corr.pdf"
-    ),
+    filename = here("outputs", workflow_name, "bfs_forward_corr.pdf"),
     plot = plot_bfs_forward_corr,
     width = 8, height = 8,
     units = "in", dpi = 300
@@ -575,10 +563,7 @@ plot_param_dist_bfs_forward
 
 if (knitting) {
   ggsave(
-    filename = here(
-      "outputs", "simulate-model-behaviors",
-      "bfs_forward_param_dist.pdf"
-    ),
+    filename = here("outputs", workflow_name, "bfs_forward_param_dist.pdf"),
     plot = plot_param_dist_bfs_forward,
     width = 5, height = 5,
     units = "in", dpi = 300
@@ -587,7 +572,7 @@ if (knitting) {
   sim_behav_bfs_forward %>%
     write_csv(
       here(
-        "data", "simulated-model-behaviors",
+        "data", "simulated_model_behaviors",
         "sim_nav_bfs_forward_no_lapse.csv"
       )
     )
@@ -595,7 +580,7 @@ if (knitting) {
   sim_behav_bfs_forward_with_lapse %>%
     write_csv(
       here(
-        "data", "simulated-model-behaviors",
+        "data", "simulated_model_behaviors",
         "sim_nav_bfs_forward_with_lapse.csv"
       )
     )
@@ -672,18 +657,14 @@ plot_ideal_obs_summary
 
 if (knitting) {
   ggsave(
-    filename = here(
-      "outputs", "simulate-model-behaviors", "ideal_obs_trials.pdf"
-    ),
+    filename = here("outputs", workflow_name, "ideal_obs_trials.pdf"),
     plot = plot_ideal_obs_trials,
     width = 6, height = 6,
     units = "in", dpi = 300
   )
   
   ggsave(
-    filename = here(
-      "outputs", "simulate-model-behaviors", "ideal_obs_summary.pdf"
-    ),
+    filename = here("outputs", workflow_name, "ideal_obs_summary.pdf"),
     plot = plot_ideal_obs_summary,
     width = 5, height = 5,
     units = "in", dpi = 300
@@ -729,9 +710,7 @@ plot_ideal_obs_corr
 
 if (knitting) {
   ggsave(
-    filename = here(
-      "outputs", "simulate-model-behaviors", "ideal_obs_corr.pdf"
-    ),
+    filename = here("outputs", workflow_name, "ideal_obs_corr.pdf"),
     plot = plot_ideal_obs_corr,
     width = 8, height = 8,
     units = "in", dpi = 300
@@ -780,9 +759,7 @@ plot_param_dist_ideal_obs
 
 if (knitting) {
   ggsave(
-    filename = here(
-      "outputs", "simulate-model-behaviors", "ideal_obs_param_dist.pdf"
-    ),
+    filename = here("outputs", workflow_name, "ideal_obs_param_dist.pdf"),
     plot = plot_param_dist_ideal_obs,
     width = 5, height = 5,
     units = "in", dpi = 300
@@ -791,7 +768,7 @@ if (knitting) {
   sim_behav_ideal_obs %>%
     write_csv(
       here(
-        "data", "simulated-model-behaviors",
+        "data", "simulated_model_behaviors",
         "sim_nav_ideal_obs_no_lapse.csv"
       )
     )
@@ -910,9 +887,7 @@ plot_sr_analytic_rep
 
 if (knitting) {
   ggsave(
-    filename = here(
-      "outputs", "simulate-model-behaviors", "sr_analytic_rep.pdf"
-    ),
+    filename = here("outputs", workflow_name, "sr_analytic_rep.pdf"),
     plot = plot_sr_analytic_rep,
     width = 8, height = 6,
     units = "in", dpi = 300,
@@ -1075,9 +1050,7 @@ plot_sr_analytic_nav
 
 if (knitting) {
   ggsave(
-    filename = here(
-      "outputs", "simulate-model-behaviors", "sr_analytic_count_vs_prob.pdf"
-    ),
+    filename = here("outputs", workflow_name, "sr_analytic_count_vs_prob.pdf"),
     plot = plot_sr_analytic_nav,
     width = 6, height = 8,
     units = "in", dpi = 300,
@@ -1106,11 +1079,11 @@ obs_for_sr_delta_rule <- expand_grid(
   ungroup()
 
 if (knitting) {
-  here("data", "sr-obs") %>%
+  here("data", "sr_obs") %>%
     create_path()
   
   obs_for_sr_delta_rule %>%
-    write_csv(file = here("data", "sr-obs", "sim_obs_for_sr.csv"))
+    write_csv(file = here("data", "sr_obs", "sim_obs_for_sr.csv"))
 }
 ```
 
@@ -1207,9 +1180,7 @@ plot_sr_delta_rep
 
 if (knitting) {
   ggsave(
-    filename = here(
-      "outputs", "simulate-model-behaviors", "sr_delta_rule_rep.pdf"
-    ),
+    filename = here("outputs", workflow_name, "sr_delta_rule_rep.pdf"),
     plot = plot_sr_delta_rep,
     width = 8, height = 6,
     units = "in", dpi = 300,
@@ -1365,9 +1336,7 @@ plot_sr_delta_nav
 
 if (knitting) {
   ggsave(
-    filename = here(
-      "outputs", "simulate-model-behaviors", "sr_delta_rule_100_vs_5000.pdf"
-    ),
+    filename = here("outputs", workflow_name, "sr_delta_rule_100_vs_5000.pdf"),
     plot = plot_sr_delta_nav,
     width = 6, height = 8,
     units = "in", dpi = 300,
@@ -1467,7 +1436,7 @@ plot_sr_comparison_1
 if (knitting) {
   ggsave(
     filename = here(
-      "outputs", "simulate-model-behaviors", "sr_analytic_vs_delta_rule_1.pdf"
+      "outputs", workflow_name, "sr_analytic_vs_delta_rule_1.pdf"
     ),
     plot = plot_sr_comparison_1,
     width = 6, height = 8,
@@ -1537,7 +1506,7 @@ plot_sr_comparison_2
 if (knitting) {
   ggsave(
     filename = here(
-      "outputs", "simulate-model-behaviors", "sr_analytic_vs_delta_rule_2.pdf"
+      "outputs", workflow_name, "sr_analytic_vs_delta_rule_2.pdf"
     ),
     plot = plot_sr_comparison_2,
     width = 5, height = 5,
@@ -1646,9 +1615,7 @@ plot_sr_summary
 
 if (knitting) {
   ggsave(
-    filename = here(
-      "outputs", "simulate-model-behaviors", "sr_trials.pdf"
-    ),
+    filename = here("outputs", workflow_name, "sr_trials.pdf"),
     plot = plot_sr_trials,
     width = 10, height = 10,
     units = "in", dpi = 300,
@@ -1656,9 +1623,7 @@ if (knitting) {
   )
   
   ggsave(
-    filename = here(
-      "outputs", "simulate-model-behaviors", "sr_summary.pdf"
-    ),
+    filename = here("outputs", workflow_name, "sr_summary.pdf"),
     plot = plot_sr_summary,
     width = 5, height = 5,
     units = "in", dpi = 300,
@@ -1784,18 +1749,14 @@ plot_param_dist_sr_softmax
 
 if (knitting) {
   ggsave(
-    filename = here(
-      "outputs", "simulate-model-behaviors", "sr_param_dist.pdf"
-    ),
+    filename = here("outputs", workflow_name, "sr_param_dist.pdf"),
     plot = plot_param_dist_sr,
     width = 5, height = 5,
     units = "in", dpi = 300
   )
   
   ggsave(
-    filename = here(
-      "outputs", "simulate-model-behaviors", "sr_param_dist_softmax.pdf"
-    ),
+    filename = here("outputs", workflow_name, "sr_param_dist_softmax.pdf"),
     plot = plot_param_dist_sr_softmax,
     width = 5, height = 5,
     units = "in", dpi = 300
@@ -1804,7 +1765,7 @@ if (knitting) {
   sim_behav_sr %>%
     write_csv(
       here(
-        "data", "simulated-model-behaviors",
+        "data", "simulated_model_behaviors",
         "sim_nav_sr_no_lapse.csv"
       )
     )
@@ -1812,7 +1773,7 @@ if (knitting) {
   sim_behav_sr_with_lapse %>%
     write_csv(
       here(
-        "data", "simulated-model-behaviors",
+        "data", "simulated_model_behaviors",
         "sim_nav_sr_with_lapse.csv"
       )
     )
@@ -1855,9 +1816,7 @@ plot_nav_predictions_for_supp
 
 if (knitting) {
   ggsave(
-    filename = here(
-      "figures", "supp_sim_model_based_planning.pdf"
-    ),
+    filename = here("figures", "supp_sim_model_based_planning.pdf"),
     plot = plot_nav_predictions_for_supp,
     width = 8, height = 4,
     units = "in", dpi = 300
