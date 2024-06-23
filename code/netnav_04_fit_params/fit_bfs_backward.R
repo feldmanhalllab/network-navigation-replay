@@ -9,7 +9,7 @@ library(tictoc)
 
 # Load in utils
 source(here("code", "utils", "modeling_utils.R"))
-source(here("code", "fit-params", "objective_functions.R"))
+source(here("code", "netnav_04_fit_params", "objective_functions.R"))
 
 create_path <- function(this_path) {
   if (!dir.exists(this_path)) {
@@ -17,7 +17,7 @@ create_path <- function(this_path) {
   }
 }
 
-save_results_to <- here("data", "param-fits", "bfs-backward", "")
+save_results_to <- here("data", "param_fits", "bfs_backward", "")
 
 if (run_on_cluster) {
   # Get args from shell script and SLURM environment
@@ -45,7 +45,7 @@ if (run_on_cluster) {
 #### Load/tidy data ####
 
 bfs_backward_sims <- here(
-  "data", "bfs-sims", "bfs_sims_learned_reverse.csv"
+  "data", "bfs_sims", "bfs_sims_learned_reverse.csv"
 ) %>%
   read_csv(show_col_types = FALSE) %>%
   filter(
@@ -62,7 +62,7 @@ bfs_backward_sims <- here(
   )
 
 behavior <- here(
-  "data", "clean-data", str_c("study", this_study, "_message_passing.csv")
+  "data", "clean_data", str_c("study", this_study, "_message_passing.csv")
 ) %>%
   read_csv(show_col_types = FALSE) %>%
   filter(

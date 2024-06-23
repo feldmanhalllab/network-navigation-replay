@@ -12,7 +12,7 @@
 #SBATCH --output=fit_bfs_forward_config_id_%a.out
 #SBATCH --array=1-288
 
-workflow_name="fit-params"
+workflow_name="netnav_04_fit_params"
 
 
 ### Boilerplate setup

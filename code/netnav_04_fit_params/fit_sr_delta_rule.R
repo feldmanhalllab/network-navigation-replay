@@ -10,7 +10,7 @@ library(tictoc)
 # Load in utils
 source(here("code", "utils", "modeling_utils.R"))
 source(here("code", "utils", "representation_utils.R"))
-source(here("code", "fit-params", "objective_functions.R"))
+source(here("code", "netnav_04_fit_params", "objective_functions.R"))
 
 create_path <- function(this_path) {
   if (!dir.exists(this_path)) {
@@ -18,7 +18,7 @@ create_path <- function(this_path) {
   }
 }
 
-save_results_to <- here("data", "param-fits", "sr-delta-rule", "")
+save_results_to <- here("data", "param_fits", "sr_delta_rule", "")
 
 if (run_on_cluster) {
   # Get args from shell script and SLURM environment
@@ -46,7 +46,7 @@ if (run_on_cluster) {
 #### Load/tidy data ####
 
 behavior <- here(
-  "data", "clean-data", str_c("study", this_study, "_message_passing.csv")
+  "data", "clean_data", str_c("study", this_study, "_message_passing.csv")
 ) %>%
   read_csv(show_col_types = FALSE) %>%
   filter(
@@ -77,10 +77,10 @@ behavior <- here(
     measurement_id == .env$this_measurement
   )
 
-adjlist <- here("data", "clean-data", "adjlist_learned.csv") %>%
+adjlist <- here("data", "clean_data", "adjlist_learned.csv") %>%
   read_csv(show_col_types = FALSE)
 
-learning_obs <- here("data", "sr-obs", "sim_obs_for_sr.csv") %>%
+learning_obs <- here("data", "sr_obs", "sim_obs_for_sr.csv") %>%
   read_csv(show_col_types = FALSE) %>%
   filter(iter <= 100) %>%
   select(from, to) %>%
