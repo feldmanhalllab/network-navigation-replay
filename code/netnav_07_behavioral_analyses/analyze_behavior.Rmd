@@ -213,9 +213,8 @@ predict_nav_day1 <- expand_grid(
 ) %>%
   predict_glmmTMB(stats_nav_day1_dist2)
 
-plot_nav_day1 <- bind_rows(nav_study2, nav_study3) %>%
-  filter(measurement_id == "D1") %>%
-  group_by(sub_id, measurement_id, shortest_path) %>%
+plot_nav_day1 <- nav_day1 %>%
+  group_by(sub_id, shortest_path) %>%
   summarise(accuracy = mean(correct), .groups = "drop") %>%
   ggplot(aes(x=shortest_path, y=accuracy)) +
   theme_custom() +
@@ -544,8 +543,16 @@ changes_in_gamma <- params %>%
     delta_lookahead = lookahead - first(lookahead)
   ) %>%
   ungroup()
-```
 
+changes_in_behavior <- bind_rows(nav_study2, nav_study3) %>%
+  filter(measurement_id %in% c("D1", "D2")) %>%
+  group_by(study, sub_id, measurement_id, shortest_path) %>%
+  summarise(accuracy = mean(correct), .groups = "drop") %>%
+  arrange(study, sub_id, shortest_path, measurement_id) %>%
+  group_by(study, sub_id, shortest_path) %>%
+  mutate(delta_accuracy = accuracy - first(accuracy)) %>%
+  ungroup()
+```
 
 ```{r stats-gamma-increase}
 changes_in_gamma %>%
@@ -620,26 +627,12 @@ if (knitting) {
 Are changes in estimated gamma related to changes in navigation behaviors?
 
 ```{r stats-gamma-accuracy}
-bind_rows(nav_study2, nav_study3) %>%
-  filter(measurement_id %in% c("D1", "D2")) %>%
-  group_by(study, sub_id, measurement_id, shortest_path) %>%
-  summarise(accuracy = mean(correct), .groups = "drop") %>%
-  pivot_wider(names_from = measurement_id, values_from = accuracy) %>%
-  mutate(delta_accuracy = D2 - D1) %>%
-  select(-c(D1, D2)) %>%
+changes_in_behavior %>%
+  filter(measurement_id == "D2") %>%
   left_join(
-    params %>%
-      filter(
-        study %in% c("Study 2", "Study 3"),
-        measurement_id %in% c("D1", "D2"),
-        model == "sr_analytic",
-        param_name == "sr_gamma"
-      ) %>%
-      select(study, sub_id, measurement_id, sr_gamma = param_value) %>%
-      pivot_wider(names_from = measurement_id, values_from = sr_gamma) %>%
-      mutate(delta_sr = D2 - D1) %>%
-      select(-c(D1, D2)),
-    by = c("study", "sub_id")
+    changes_in_gamma %>%
+      filter(measurement_id == "D2"),
+    by = join_by(study, sub_id, measurement_id)
   ) %>%
   group_by(shortest_path) %>%
   nest() %>%
@@ -649,7 +642,7 @@ bind_rows(nav_study2, nav_study3) %>%
       .f = ~with(
         .x,
         cor.test(
-          delta_accuracy, delta_sr,
+          delta_accuracy, delta_gamma,
           method = "spearman", exact = FALSE, alternative = "greater"
         )
       ) %>% tidy()
@@ -658,38 +651,18 @@ bind_rows(nav_study2, nav_study3) %>%
   unnest(test) %>%
   ungroup() %>%
   select(-data) %>%
-  kbl(
-    caption = str_c(
-      "<center>", "∆ Accuracy ~ ∆ SR gamma (after overnight rest)", "</center>"
-    ),
-    digits = 3
-  ) %>%
-  kable_styling(bootstrap_options = c("responsive"))
+  kable_custom("∆ Accuracy ~ ∆ SR gamma (after overnight rest)", digits = 3)
 ```
 
 ```{r plot-gamma-accuracy}
-plot_gamma_accuracy_change <- bind_rows(nav_study2, nav_study3) %>%
-  filter(measurement_id %in% c("D1", "D2")) %>%
-  group_by(study, sub_id, measurement_id, shortest_path) %>%
-  summarise(accuracy = mean(correct), .groups = "drop") %>%
-  pivot_wider(names_from = measurement_id, values_from = accuracy) %>%
-  mutate(delta_accuracy = D2 - D1) %>%
-  select(-c(D1, D2)) %>%
+plot_gamma_accuracy_change <- changes_in_behavior %>%
+  filter(measurement_id == "D2") %>%
   left_join(
-    params %>%
-      filter(
-        study %in% c("Study 2", "Study 3"),
-        measurement_id %in% c("D1", "D2"),
-        model == "sr_analytic",
-        param_name == "sr_gamma"
-      ) %>%
-      select(study, sub_id, measurement_id, sr_gamma = param_value) %>%
-      pivot_wider(names_from = measurement_id, values_from = sr_gamma) %>%
-      mutate(delta_sr = D2 - D1) %>%
-      select(-c(D1, D2)),
-    by = c("study", "sub_id")
+    changes_in_gamma %>%
+      filter(measurement_id == "D2"),
+    by = join_by(study, sub_id, measurement_id)
   ) %>%
-  ggplot(aes(x=delta_sr, y=delta_accuracy, color=shortest_path)) +
+  ggplot(aes(x=delta_gamma, y=delta_accuracy, color=shortest_path)) +
   theme_custom() +
   geom_hline(yintercept = 0, linetype = "dashed") +
   geom_vline(xintercept = 0, linetype = "dashed") +
@@ -714,14 +687,235 @@ plot_gamma_accuracy_change
 
 if (knitting) {
   ggsave(
-    here(
-      "outputs", workflow_name, str_c("gamma_accuracy_change", ".pdf")
-    ),
+    here("outputs", workflow_name, str_c("gamma_accuracy_change", ".pdf")),
     plot = plot_gamma_accuracy_change,
     width = 6, height = 4,
     units = "in", dpi = 300,
     device = cairo_pdf
   )
 }
+```
+
+
+# Do people bring social priors into learning?
+
+In principle, it's possible that subjects would have shown comparable "navigation" behaviors if they'd learned about a network of (e.g.) computers transmitting messages to each other. It'd be nice if we could find some evidence that subjects construed the task as being "social", so we'll see if there's evidence that people bring social priors about homophily into learning.
+
+```{r load-learning-data}
+adjlist <- here("data", "clean_data", "adjlist_learned.csv") %>%
+  read_csv(show_col_types = FALSE)
+
+nodes_study1 <- here("data", "clean_data", "study1_node_mappings.csv") %>%
+  read_csv(show_col_types = FALSE)
+
+nodes_study2 <- here("data", "clean_data", "study2_node_mappings.csv") %>%
+  read_csv(show_col_types = FALSE)
+
+nodes_study3 <- here("data", "clean_data", "study3_node_mappings.csv") %>%
+  read_csv(show_col_types = FALSE)
+
+learn_study1 <- here("data", "clean_data", "study1_learn.csv") %>%
+  read_csv(show_col_types = FALSE) %>%
+  mutate(
+    block = case_when(
+      trial <= 13 ~ 1,
+      trial <= 13*2 ~ 2,
+      trial <= 13*3 ~ 3,
+      trial <= 13*4 ~ 4,
+      trial <= 13*5 ~ 5,
+      trial <= 13*6 ~ 6
+    )
+  ) %>%
+  select(sub_id, block, from = target_id, to = guess_id, guess_correct)
+
+learn_study2 <- here("data", "clean_data", "study2_learn.csv") %>%
+  read_csv(show_col_types = FALSE) %>%
+  mutate(
+    block = case_when(
+      trial <= 13 ~ 1,
+      trial <= 13*2 ~ 2,
+      trial <= 13*3 ~ 3,
+      trial <= 13*4 ~ 4,
+      trial <= 13*5 ~ 5,
+      trial <= 13*6 ~ 6
+    )
+  ) %>%
+  select(sub_id, block, from = target_id, to = guess_id, guess_correct)
+
+learn_study3 <- here("data", "clean_data", "study3_learn.csv") %>%
+  read_csv(show_col_types = FALSE) %>%
+  mutate(
+    block = case_when(
+      trial <= 13 ~ 1,
+      trial <= 13*2 ~ 2,
+      trial <= 13*3 ~ 3,
+      trial <= 13*4 ~ 4,
+      trial <= 13*5 ~ 5,
+      trial <= 13*6 ~ 6
+    )
+  ) %>%
+  select(sub_id, block, from = target_id, to = guess_id, guess_correct)
+```
+
+```{r df-learning-with-nodes}
+learn_study1_nodes <- expand_grid(
+  sub_id = sort(unique(learn_study1$sub_id)),
+  block = 1:6,
+  from = 1:13,
+  to = from
+) %>%
+  filter(from != to) %>%
+  left_join(learn_study1) %>%
+  mutate(guessed_friends = !is.na(guess_correct)) %>%
+  select(-guess_correct) %>%
+  left_join(adjlist, by = join_by(from, to)) %>%
+  left_join(
+    nodes_study1 %>%
+      select(
+        sub_id,
+        from = node_id,
+        from_race = node_race,
+        from_gender = node_gender
+      ),
+    by = join_by(sub_id, from)
+  ) %>%
+  left_join(
+    nodes_study1 %>%
+      select(
+        sub_id,
+        to = node_id,
+        to_race = node_race,
+        to_gender = node_gender
+      ),
+    by = join_by(sub_id, to)
+  )
+
+learn_study2_nodes <- expand_grid(
+  sub_id = sort(unique(learn_study2$sub_id)),
+  block = 1:6,
+  from = 1:13,
+  to = from
+) %>%
+  filter(from != to) %>%
+  left_join(learn_study2) %>%
+  mutate(guessed_friends = !is.na(guess_correct)) %>%
+  select(-guess_correct) %>%
+  left_join(adjlist, by = join_by(from, to)) %>%
+  left_join(
+    nodes_study2 %>%
+      select(
+        sub_id,
+        from = node_id,
+        from_race = node_race,
+        from_gender = node_gender
+      ),
+    by = join_by(sub_id, from)
+  ) %>%
+  left_join(
+    nodes_study2 %>%
+      select(
+        sub_id,
+        to = node_id,
+        to_race = node_race,
+        to_gender = node_gender
+      ),
+    by = join_by(sub_id, to)
+  )
+
+learn_study3_nodes <- expand_grid(
+  sub_id = sort(unique(learn_study3$sub_id)),
+  block = 1:6,
+  from = 1:13,
+  to = from
+) %>%
+  filter(from != to) %>%
+  left_join(learn_study3) %>%
+  mutate(guessed_friends = !is.na(guess_correct)) %>%
+  select(-guess_correct) %>%
+  left_join(adjlist, by = join_by(from, to)) %>%
+  left_join(
+    nodes_study3 %>%
+      select(
+        sub_id,
+        from = node_id,
+        from_race = node_race,
+        from_gender = node_gender
+      ),
+    by = join_by(sub_id, from)
+  ) %>%
+  left_join(
+    nodes_study3 %>%
+      select(
+        sub_id,
+        to = node_id,
+        to_race = node_race,
+        to_gender = node_gender
+      ),
+    by = join_by(sub_id, to)
+  )
+```
+
+In the mixed-effects logistic regression below, we're trying to predict whether a subject guessed that two network members were friends, given that those network members were same-race or same-gender. To make sure that these actually reflect subjects' priors, we'll only look at responses where the two network members were *not* actually friends. 
+
+The learning task consisted of six blocks in total, where each block presented every network member as a Target. On each trial, subjects were presented with virtual flash cards. When shown a Target network member, participants were required to find all of the Target's friends from the face-down cards. When a card corresponding to the Target's friend was selected, the card flipped face-up to reveal their photograph. Cards remained face-down in response to incorrect guesses. To ensure that subjects were truly learning about friendships, rather than something low-level like the cards' spatial location, we shuffled where the cards were located in block four. Due to this task design, subjects were only able to guess randomly during blocks one and four, and we therefore excluded these blocks from our analysis.
+
+```{r stats-social-priors}
+bind_rows(
+  learn_study1_nodes %>% mutate(study = 1),
+  learn_study2_nodes %>% mutate(study = 2),
+  learn_study3_nodes %>% mutate(study = 3),
+) %>%
+  # Homophily
+  mutate(
+    same_race = from_race == to_race,
+    same_gender = from_gender == to_gender
+  ) %>%
+  # Only include blocks where the subject plausibly knew which face-down
+  # flash cards were associated with which network member
+  filter(block %in% c(2, 3, 5, 6)) %>%
+  # Only look at pairs of network members who were NOT actually friends
+  filter(edge == 0) %>%
+  # Unique identifier for each subject, across studies
+  mutate(sub_id = str_c("study", study, ", sub", sub_id)) %>%
+  glmmTMB(
+    guessed_friends ~ same_race + same_gender + (1 | sub_id) + (1 | study),
+    family = binomial,
+    data = .
+  ) %>%
+  tidy(conf.int = TRUE) %>%
+  check_significance() %>%
+  kable_custom("Learning task: Evidence of social priors", digits = 3)
+```
+
+To see how "sticky" these priors were, we can try looking *only* at the data from the last block. Even here, we see evidence that race and gender homophily influence subjects' learning.
+
+```{r stats-social-priors-last-block}
+bind_rows(
+  learn_study1_nodes %>% mutate(study = 1),
+  learn_study2_nodes %>% mutate(study = 2),
+  learn_study3_nodes %>% mutate(study = 3),
+) %>%
+  # Homophily
+  mutate(
+    same_race = from_race == to_race,
+    same_gender = from_gender == to_gender
+  ) %>%
+  # Only include the last block
+  filter(block == 6) %>%
+  # Only look at pairs of network members who were NOT actually friends
+  filter(edge == 0) %>%
+  # Unique identifier for each subject, across studies
+  mutate(sub_id = str_c("study", study, ", sub", sub_id)) %>%
+  glmmTMB(
+    guessed_friends ~ same_race + same_gender + (1 | sub_id) + (1 | study),
+    family = binomial,
+    data = .
+  ) %>%
+  tidy(conf.int = TRUE) %>%
+  check_significance() %>%
+  kable_custom(
+    c("Learning task: Evidence of social priors", "(Only last block)"),
+    digits = 3
+  )
 ```
 
