@@ -1,0 +1,1737 @@
+---
+title: "Transition reevaluation"
+output:
+  html_document:
+    code_download: true
+    code_folding: hide
+    toc: true
+    toc_float:
+      collapsed: true
+---
+
+# Setup
+
+```{r libraries}
+workflow_name <- "netnav_08_transition_reevaluation"
+
+library(tidyverse)
+library(here)
+
+library(patchwork)
+library(rcartocolor)
+
+library(glmmTMB)
+library(broom.mixed)
+
+source(here("code", "utils", "modeling_utils.R"))
+source(here("code", "utils", "representation_utils.R"))
+source(here("code", "utils", "bayesian_model_selection.R"))
+
+source(here("code", "utils", "ggplot_themes.R"))
+source(here("code", "utils", "kable_utils.R"))
+source(here("code", "utils", "unicode_greek.R"))
+
+knitting <- knitr::is_html_output()
+
+create_path <- function(this_path) {
+  if (!dir.exists(this_path)) {
+    dir.create(this_path, recursive = TRUE)
+  }
+}
+
+predict_glmmTMB <- function(make_predictions_for, model_object) {
+  make_predictions_for %>%
+    bind_cols(
+      predict(
+        object = model_object,
+        newdata = .,
+        re.form = NA, allow.new.levels = TRUE, se.fit = TRUE, type = "response"
+      )
+    )
+}
+
+check_significance <- function(tidy_df) {
+  tidy_df %>%
+    mutate(
+      sig = case_when(
+        p.value < 0.001 ~ "***",
+        p.value < 0.01 ~ "**",
+        p.value < 0.05 ~ "*",
+        p.value < 0.1 ~ ".",
+        TRUE ~ ""
+      )
+    )
+}
+
+if (knitting) {
+  here("outputs", workflow_name) %>%
+    create_path()
+  
+  here("figures") %>%
+    create_path()
+}
+```
+
+```{r load-behav}
+nav_study2 <- here("data", "clean_data", "study2_message_passing.csv") %>%
+  read_csv(show_col_types = FALSE) %>%
+  filter(
+    two_correct_options == FALSE,
+    shortest_path_given_opts == shortest_path_given_start_end
+  ) %>%
+  mutate(
+    study = "Study 2",
+    measurement_id = case_when(
+      network == "learned" ~ str_c("D", measurement_id),
+      network == "reevaluated" ~ "D2b"
+    ),
+    shortest_path = factor(shortest_path_given_opts)
+  ) %>%
+  select(
+    study, sub_id, measurement_id, shortest_path,
+    startpoint_id, endpoint_id,
+    opt1_id, opt2_id,
+    correct_choice, sub_choice,
+    correct, rt,
+    one_impossible_option,
+    opt1_distance = dist_opt1,
+    opt2_distance = dist_opt2
+  ) %>%
+  # Replace undefined distances (corresponding to impossible options)
+  # so that the softmax gets non-NA inputs; we assume that impossible
+  # options are just as bad as the longest distance found in this set
+  # of trials, i.e., a distance of 8
+  mutate(across(c(opt1_distance, opt2_distance), ~replace_na(.x, 8)))
+
+nav_study3 <- here("data", "clean_data", "study3_message_passing.csv") %>%
+  read_csv(show_col_types = FALSE) %>%
+  filter(
+    two_correct_options == FALSE,
+    shortest_path_given_opts == shortest_path_given_start_end
+  ) %>%
+  mutate(
+    study = "Study 3",
+    measurement_id = case_when(
+      network == "reevaluated" ~ "D2b",
+      measurement_id == 1 ~ "D1",
+      measurement_id == 2 ~ "D1b",
+      measurement_id == 3 ~ "D2"
+    ),
+    shortest_path = factor(shortest_path_given_opts)
+  ) %>%
+  select(
+    study, sub_id, measurement_id, shortest_path,
+    startpoint_id, endpoint_id,
+    opt1_id, opt2_id,
+    correct_choice, sub_choice,
+    correct, rt,
+    one_impossible_option,
+    opt1_distance = dist_opt1,
+    opt2_distance = dist_opt2
+  ) %>%
+  mutate(across(c(opt1_distance, opt2_distance), ~replace_na(.x, 8)))
+```
+
+```{r load-nav-trials}
+nav_trials_learned <- here("data", "clean_data", "study1_message_passing.csv") %>%
+  read_csv(show_col_types = FALSE) %>%
+  filter(
+    two_correct_options == FALSE,
+    shortest_path_given_opts == shortest_path_given_start_end
+  ) %>%
+  mutate(shortest_path = factor(shortest_path_given_opts)) %>%
+  filter(sub_id == 1) %>%
+  select(
+    shortest_path,
+    startpoint_id, endpoint_id,
+    opt1_id, opt2_id,
+    correct_choice,
+    opt1_distance = dist_opt1,
+    opt2_distance = dist_opt2
+  ) %>%
+  arrange(shortest_path, startpoint_id, endpoint_id, opt1_id, opt2_id) %>%
+  # Replace undefined distances (corresponding to impossible options)
+  # so that the softmax gets non-NA inputs; we assume that impossible
+  # options are just as bad as the longest distance found in this set
+  # of trials, i.e., a distance of 8
+  mutate(across(c(opt1_distance, opt2_distance), ~replace_na(.x, 8)))
+
+nav_trials_reeval <- here("data", "clean_data", "study2_message_passing.csv") %>%
+  read_csv(show_col_types = FALSE) %>%
+  filter(
+    two_correct_options == FALSE,
+    shortest_path_given_opts == shortest_path_given_start_end,
+    sub_id == 1,
+    network == "reevaluated",
+  ) %>%
+  mutate(shortest_path = factor(shortest_path_given_opts)) %>%
+  select(
+    shortest_path,
+    startpoint_id, endpoint_id,
+    opt1_id, opt2_id,
+    correct_choice,
+    opt1_distance = dist_opt1,
+    opt2_distance = dist_opt2
+  ) %>%
+  arrange(shortest_path, startpoint_id, endpoint_id) %>%
+  mutate(across(c(opt1_distance, opt2_distance), ~replace_na(.x, 8)))
+```
+
+```{r load-sr-stuff}
+sr_obs <- here("data", "sr_obs", "sim_obs_for_sr.csv") %>%
+  read_csv(show_col_types = FALSE)
+
+adjlist_learned <- here("data", "clean_data", "adjlist_learned.csv") %>%
+  read_csv(show_col_types = FALSE)
+
+transmat_learned <- adjlist_learned %>%
+  group_by(from) %>%
+  mutate(edge = edge / sum(edge)) %>%
+  ungroup() %>%
+  pivot_wider(names_from = to, values_from = edge) %>%
+  column_to_rownames("from") %>%
+  as.matrix()
+
+adjlist_reeval <- here("data", "clean_data", "adjlist_reevaluated.csv") %>%
+  read_csv(show_col_types = FALSE)
+
+transmat_reeval <- adjlist_reeval %>%
+  group_by(from) %>%
+  mutate(edge = edge / sum(edge)) %>%
+  ungroup() %>%
+  pivot_wider(names_from = to, values_from = edge) %>%
+  column_to_rownames("from") %>%
+  as.matrix()
+```
+
+```{r load-bfs-stuff}
+bfs_backward_sims_reeval <- here(
+  "data", "bfs_sims", "bfs_sims_reevaluated_backward.csv"
+) %>%
+  read_csv(show_col_types = FALSE) %>%
+  filter(
+    shortest_path_given_opts == shortest_path_given_start_end,
+    two_correct_options == FALSE
+  ) %>%
+  mutate(shortest_path = factor(shortest_path_given_opts)) %>%
+  select(-starts_with("shortest_path_given")) %>%
+  group_by(shortest_path, startpoint_id, endpoint_id, opt1_id, opt2_id) %>%
+  summarise(
+    p_bfs_correct = mean(bfs_choice == correct_choice),
+    p_bfs_chooses_opt1 = mean(bfs_choice == opt1_id),
+    bfs_visits = mean(bfs_n_visits_total),
+    .groups = "drop"
+  )
+
+bfs_forward_sims_reeval <- here(
+  "data", "bfs_sims", "bfs_sims_reevaluated_forward.csv"
+) %>%
+  read_csv(show_col_types = FALSE) %>%
+  filter(
+    shortest_path_given_opts == shortest_path_given_start_end,
+    two_correct_options == FALSE
+  ) %>%
+  mutate(shortest_path = factor(shortest_path_given_opts)) %>%
+  select(-starts_with("shortest_path_given")) %>%
+  group_by(shortest_path, startpoint_id, endpoint_id, opt1_id, opt2_id) %>%
+  summarise(
+    p_bfs_correct = mean(bfs_choice == correct_choice),
+    p_bfs_chooses_opt1 = mean(bfs_choice == opt1_id),
+    bfs_visits = mean(bfs_n_visits_total),
+    .groups = "drop"
+  )
+```
+
+```{r load-params}
+params <- here(
+  "data", "param_fits", "clean_params", "clean_param_fits.csv"
+) %>%
+  read_csv(show_col_types = FALSE) %>%
+  filter(measurement_id == "D2")
+```
+
+
+# Interpreting transition reevaluation
+
+Before we get to the analyses, there's an important caveat we need to consider. So far, subjects completed the same set of social navigation trials at each measurement/timepoint: before rest, after awake rest, and after overnight rest.
+
+After transition reevaluation, subjects completed a new set of social navigation trials. It is possible that there are differences between the "main" versus "reevaluated" trials, like how difficult the trials are on average.
+
+One "model-free" way to test this is by looking at the difference in shortest path distances from each Source to the Target (i.e., distance from Source B to Target, minus distance from Source A to Target). Trials with greater distance differences are easier, so if we observe differences in the average distance differences between the main vs reevaluated trials, this signals a possible confound. Indeed, the plot below suggests such a confound exists.
+
+```{r plot-distance-differences}
+plot_learned_vs_reeval_dist_diff <- bind_rows(
+  nav_trials_learned %>% mutate(trials = "learned"),
+  nav_trials_reeval %>% mutate(trials = "reevaluated"),
+) %>%
+  mutate(diff_dist = opt2_distance - opt1_distance) %>%
+  ggplot(aes(x=shortest_path, y=diff_dist, color=trials)) +
+  theme_custom() +
+  geom_point(
+    alpha = 0.1,
+    position = position_jitterdodge(
+      jitter.width = 0.1, jitter.height = 0, dodge.width = 0.5, seed = 1
+    ),
+    show.legend = FALSE
+  ) +
+  stat_summary(
+    geom = "crossbar", fun = mean,
+    position = position_dodge(width = 0.5)
+  ) +
+  scale_color_manual(
+    name = NULL,
+    labels = c(
+      "learned"="Main trials",
+      "reevaluated"="Reevaluated trials"
+    ),
+    values = c("learned"="#bd0026", "reevaluated"="#fd8d3c")
+  ) +
+  scale_x_discrete(name = "Shortest path distance") +
+  scale_y_continuous(
+    name = str_c(
+      unicode_greek["Delta"], " Distance to Target",
+      "\n",
+      "(Larger = easier)"
+    )
+  ) +
+  theme(legend.position = "bottom") +
+  ggtitle("Transition reevaluation trials are harder")
+
+plot_learned_vs_reeval_dist_diff
+
+if (knitting) {
+  ggsave(
+    filename = here(
+      "outputs", workflow_name,
+      "main_vs_reeval_trials_distance_diffs.pdf"
+    ),
+    plot = plot_learned_vs_reeval_dist_diff,
+    width = 5, height = 5, units = "in", dpi = 300,
+    device = cairo_pdf
+  )
+}
+```
+
+Given that there's a difficulty confound, does this imply that an SR-agent is expected to perform worse on the reevaluated trials, for reasons unrelated to cached representation? To examine this possibility, let's simulate an *asymptotic* SR-agent that is known to use the same parameters to solve both the learned and reevaluated trials. Indeed, it seems that worse navigation accuracy in the transition reevaluation task could simply be explained by differences in how difficult the trials are.
+
+```{r plot-sr-dist-diffs}
+sim_sr_asymp_rep_learned <- map_dfr(
+  .x = seq(0.1, 0.9, 0.1),
+  .f = ~build_successor_analytically(
+    transition_matrix = transmat_learned,
+    successor_horizon = .x,
+    normalize = TRUE
+  )
+)
+
+sim_sr_asymp_rep_reeval <- map_dfr(
+  .x = seq(0.1, 0.9, 0.1),
+  .f = ~build_successor_analytically(
+    transition_matrix = transmat_reeval,
+    successor_horizon = .x,
+    normalize = TRUE
+  )
+)
+
+sim_sr_asymp_nav_learned_vs_reeval <- expand_grid(
+  sr_gamma = seq(0.1, 0.9, 0.1),
+  bind_rows(
+    nav_trials_learned %>% mutate(trials = "learned"),
+    nav_trials_reeval %>% mutate(trials = "reevaluated"),
+  )
+) %>%
+  left_join(
+    bind_rows(
+      sim_sr_asymp_rep_learned %>% mutate(trials = "learned"),
+      sim_sr_asymp_rep_reeval %>% mutate(trials = "reevaluated")
+    ) %>%
+      rename(endpoint_id = to, opt1_id = from, opt1_sr = sr_value),
+    by = join_by(trials, sr_gamma, endpoint_id, opt1_id)
+  ) %>%
+  left_join(
+    bind_rows(
+      sim_sr_asymp_rep_learned %>% mutate(trials = "learned"),
+      sim_sr_asymp_rep_reeval %>% mutate(trials = "reevaluated")
+    ) %>%
+      rename(endpoint_id = to, opt2_id = from, opt2_sr = sr_value),
+    by = join_by(trials, sr_gamma, endpoint_id, opt2_id)
+  ) %>%
+  rowwise() %>%
+  mutate(
+    accuracy = softmax(
+      option_values = c(opt1_sr, opt2_sr),
+      option_chosen = if_else(opt1_id == correct_choice, 1, 2),
+      temperature = 100,
+      use_inverse_temperature = TRUE
+    )
+  ) %>%
+  ungroup()
+
+plot_sr_asymp_learned_vs_reeval <- sim_sr_asymp_nav_learned_vs_reeval %>%
+  mutate(sr_gamma = str_c(unicode_greek["gamma"], " = ", sr_gamma)) %>%
+  ggplot(aes(x=shortest_path, y=accuracy, color=trials)) +
+  theme_custom() +
+  facet_wrap(~sr_gamma) +
+  geom_hline(yintercept = 0.5, linetype = "dashed") +
+  geom_point(
+    alpha = 0.1,
+    position = position_jitterdodge(
+      jitter.width = 0.1, jitter.height = 0, dodge.width = 0.5, seed = 1
+    ),
+    show.legend = FALSE
+  ) +
+  stat_summary(
+    geom = "crossbar", fun = mean,
+    position = position_dodge(width = 0.5)
+  ) +
+  scale_color_manual(
+    name = NULL,
+    labels = c(
+      "learned"="Main trials",
+      "reevaluated"="Reevaluated trials"
+    ),
+    values = c("learned"="#bd0026", "reevaluated"="#fd8d3c")
+  ) +
+  scale_x_discrete(name = "Shortest path distance") +
+  scale_y_continuous(
+    name = "Accuracy", labels = scales::percent, breaks = seq(0, 1, 0.25)
+  ) +
+  theme(legend.position = "bottom") +
+  ggtitle(
+    "Matched SR-agents have worse accuracy\non transition reevaluation trials"
+  )
+
+plot_sr_asymp_learned_vs_reeval
+
+if (knitting) {
+  ggsave(
+    filename = here(
+      "outputs", workflow_name,
+      "main_vs_reeval_trials_sr.pdf"
+    ),
+    plot = plot_sr_asymp_learned_vs_reeval,
+    width = 5, height = 5, units = "in", dpi = 300,
+    device = cairo_pdf
+  )
+}
+```
+
+
+# Behavioral analysis
+
+Our hypothesis is that people are using cached representations to solve the navigation task, such that transition reevaluation results in the use of "outdated" knowledge and therefore worse accuracy. To test whether this is true, we'll need to "control" for the difficulty confound, ideally in a "model-free" way (i.e., that doesn't rely on estimates from a computational model). Therefore, we'll regress out the "difference in distance" metric we visualized earlier, as it's a good index of trial difficulty.
+
+Results indicate that, after controlling for trial difficulty, subjects' transition reevaluation navigation accuracy is worse than their accuracy after overnight sleep (D2), and not statistically different from their accuracy before rest (D1).
+
+```{r stats-behav-reeval}
+stats_nav_tr_dist2 <- bind_rows(nav_study2, nav_study3) %>%
+  filter(measurement_id %in% c("D1", "D2", "D2b")) %>%
+  mutate(
+    diff_dist = opt2_distance - opt1_distance,
+    measurement_id = fct_relevel(measurement_id, "D2b"),
+    shortest_path = fct_relevel(shortest_path, "2"),
+    # Give every subject a distinct identifier
+    sub_id = str_c(study, " s", sub_id)
+  ) %>%
+  glmmTMB(
+    correct ~ diff_dist + shortest_path * measurement_id +
+      (1 + diff_dist + shortest_path + measurement_id | sub_id) + (1 | study),
+    family = binomial,
+    data = .
+  )
+
+stats_nav_tr_dist3 <- bind_rows(nav_study2, nav_study3) %>%
+  filter(measurement_id %in% c("D1", "D2", "D2b")) %>%
+  mutate(
+    diff_dist = opt2_distance - opt1_distance,
+    measurement_id = fct_relevel(measurement_id, "D2b"),
+    shortest_path = fct_relevel(shortest_path, "3"),
+    # Give every subject a distinct identifier
+    sub_id = str_c(study, " s", sub_id)
+  ) %>%
+  glmmTMB(
+    correct ~ diff_dist + shortest_path * measurement_id +
+      (1 + diff_dist + shortest_path + measurement_id | sub_id) + (1 | study),
+    family = binomial,
+    data = .
+  )
+
+stats_nav_tr_dist4 <- bind_rows(nav_study2, nav_study3) %>%
+  filter(measurement_id %in% c("D1", "D2", "D2b")) %>%
+  mutate(
+    diff_dist = opt2_distance - opt1_distance,
+    measurement_id = fct_relevel(measurement_id, "D2b"),
+    shortest_path = fct_relevel(shortest_path, "4"),
+    # Give every subject a distinct identifier
+    sub_id = str_c(study, " s", sub_id)
+  ) %>%
+  glmmTMB(
+    correct ~ diff_dist + shortest_path * measurement_id +
+      (1 + diff_dist + shortest_path + measurement_id | sub_id) + (1 | study),
+    family = binomial,
+    data = .
+  )
+
+map_dfr(
+  .x = list(
+    "dist-2" = stats_nav_tr_dist2,
+    "dist-3" = stats_nav_tr_dist3,
+    "dist-4" = stats_nav_tr_dist4
+  ),
+  .f = ~tidy(.x, conf.int = TRUE),
+  .id = "ref_cat"
+) %>%
+  check_significance() %>%
+  select(-c(effect, component)) %>%
+  kable_custom(
+    "Navigation accuracy: Transition reevaluation",
+    grouping_var = ref_cat
+  )
+```
+
+In the visualization of results, note that the estimated means and standard errors reflect the model's *predictions* of how accurately subjects would have responded, if the main vs reevaluated trials were equally difficult. The dotplots reflect the distributions of the raw, unadjusted data.
+
+```{r plot-behav-reeval}
+predict_behav_tr <- expand_grid(
+  measurement_id = c("D1", "D2", "D2b"),
+  shortest_path = factor(2:4),
+  sub_id = NA, study = NA
+) %>%
+  # Condition model predictions on the average trial difficulty from the
+  # main / pre-reevaluation set of trials
+  left_join(
+    nav_study2 %>%
+      filter(sub_id == 1, measurement_id == "D1") %>%
+      group_by(shortest_path) %>%
+      summarise(
+        diff_dist = mean(opt2_distance - opt1_distance),
+        .groups = "drop"
+      ),
+    by = join_by(shortest_path)
+  ) %>%
+  predict_glmmTMB(stats_nav_tr_dist2)
+
+plot_behav_tr <- bind_rows(nav_study2, nav_study3) %>%
+  filter(measurement_id %in% c("D1", "D2", "D2b")) %>%
+  group_by(sub_id, measurement_id, shortest_path) %>%
+  summarise(accuracy = mean(correct), .groups = "drop") %>%
+  ggplot(aes(x=shortest_path, y=accuracy, color=measurement_id)) +
+  theme_custom() +
+  geom_hline(yintercept = 0.5, linetype = "dashed") +
+  geom_dotplot(
+    aes(fill = measurement_id),
+    binwidth = 0.01,
+    binaxis = "y", stackdir = "center",
+    position = position_dodge(width = 0.75),
+    dotsize = 1, alpha = 0.5, color = NA,
+    show.legend = FALSE
+  ) +
+  geom_pointrange(
+    aes(
+      x = shortest_path, y = fit,
+      ymin = fit - se.fit, ymax = fit + se.fit,
+      color = measurement_id
+    ),
+    data = predict_behav_tr, inherit.aes = FALSE, show.legend = FALSE,
+    position = position_dodge(width = 0.25), linewidth = 1
+  ) +
+  geom_line(
+    aes(
+      x = shortest_path, y = fit,
+      group = measurement_id, color = measurement_id
+    ),
+    data = predict_behav_tr, inherit.aes = FALSE,
+    position = position_dodge(width = 0.25), linewidth = 1
+  ) +
+  scale_x_discrete(name = "Shortest path distance") +
+  scale_y_continuous(
+    name = "Accuracy", labels = scales::percent, breaks = seq(0, 1, 0.25)
+  ) +
+  scale_color_manual(
+    name = NULL,
+    values = c("D1"="#fa9fb5", "D2"="#7a0177", "D2b"="#238b45"),
+    labels = c(
+      "D1"="Before rest",
+      "D2"="After overnight rest",
+      "D2b"="After transition reevaluation"
+    )
+  ) +
+  scale_fill_manual(
+    values = c("D1"="#fa9fb5", "D2"="#7a0177", "D2b"="#238b45")
+  ) +
+  coord_cartesian(ylim = c(0.2, 1.1)) +
+  theme(legend.position = "bottom") +
+  ggtitle("Navigation after transition reevaluation")
+
+plot_behav_tr
+
+if (knitting) {
+  ggsave(
+    filename = here(
+      "outputs", workflow_name,
+      "navigation_after_reevaluation.pdf"
+    ),
+    plot = plot_behav_tr,
+    width = 6, height = 4, units = "in", dpi = 300,
+    device = cairo_pdf
+  )
+}
+```
+
+
+# Out-of-sample SR vs planning
+
+## Calculate likelihoods
+
+The transition reevaluation data provides us with an opportunity to do pretty substantial out-of-sample prediction. We've already estimated subject-specific parameters for the navigation task administered on day 2 (i.e., after overnight rest), before the transition reevaluation had occurred. We'll assume that subjects continue to use the same parameter settings to solve the navigation task administered on day 2 after transition reevaluation. This allows us to quantify out-of-sample likelihoods for each model, which then allows us to again test whether the SR fits the data better than model-based planning.
+
+It's fairly straightforward for us to compute likelihoods from the BFS-backward/forward models, as well as the ideal observer.
+
+```{r compute-likelihoods-planning}
+likelihoods_bfs_backward <- bind_rows(nav_study2, nav_study3) %>%
+  filter(measurement_id == "D2b") %>%
+  left_join(
+    params %>%
+      filter(model == "bfs_backward") %>%
+      pivot_wider(names_from = param_name, values_from = param_value) %>%
+      select(study, sub_id, search_threshold),
+    by = join_by(study, sub_id)
+  ) %>%
+  left_join(
+    bfs_backward_sims_reeval,
+    by = join_by(shortest_path, startpoint_id, endpoint_id, opt1_id, opt2_id)
+  ) %>%
+  mutate(
+    p_sub_choice_bfs = if_else(
+      sub_choice == opt1_id,
+      p_bfs_chooses_opt1,
+      1 - p_bfs_chooses_opt1
+    )
+  ) %>%
+  # What's the probability of *completing* BFS-online all the way through?
+  rowwise() %>%
+  mutate(
+    search_threshold = search_threshold,
+    p_complete_bfs = softmax(
+      option_values = c(search_threshold, bfs_visits),
+      option_chosen = 1,
+      temperature = 1
+    )
+  ) %>%
+  ungroup() %>%
+  # Weigh BFS predictions accordingly
+  mutate(
+    p_give_up = 1 - p_complete_bfs,
+    p_sub_choice = (p_complete_bfs * p_sub_choice_bfs) + (p_give_up * 1/2),
+    # To prevent log(0) = -Inf from showing up in the likelihoods, replace
+    # zeroes with the smallest non-zero value a computer can represent, aka
+    # machine-epsilon = 2.22e-16.  This is conceptually similar to estimating
+    # a small constant lapse rate, but without introducing any bias to
+    # nonzero probabilities.
+    p_sub_choice = if_else(p_sub_choice < 2.22e-16, 2.22e-16, p_sub_choice)
+  ) %>%
+  mutate(neg_ll = neg_loglik_logistic(p_sub_choice)) %>%
+  group_by(study, sub_id) %>%
+  summarise(neg_ll = sum(neg_ll), .groups = "drop")
+
+likelihoods_bfs_forward <- bind_rows(nav_study2, nav_study3) %>%
+  filter(measurement_id == "D2b") %>%
+  left_join(
+    params %>%
+      filter(model == "bfs_forward") %>%
+      pivot_wider(names_from = param_name, values_from = param_value) %>%
+      select(study, sub_id, search_threshold),
+    by = join_by(study, sub_id)
+  ) %>%
+  left_join(
+    bfs_forward_sims_reeval,
+    by = join_by(shortest_path, startpoint_id, endpoint_id, opt1_id, opt2_id)
+  ) %>%
+  mutate(
+    p_sub_choice_bfs = if_else(
+      sub_choice == opt1_id,
+      p_bfs_chooses_opt1,
+      1 - p_bfs_chooses_opt1
+    )
+  ) %>%
+  # What's the probability of *completing* BFS-online all the way through?
+  rowwise() %>%
+  mutate(
+    search_threshold = search_threshold,
+    p_complete_bfs = softmax(
+      option_values = c(search_threshold, bfs_visits),
+      option_chosen = 1,
+      temperature = 1
+    )
+  ) %>%
+  ungroup() %>%
+  # Weigh BFS predictions accordingly
+  mutate(
+    p_give_up = 1 - p_complete_bfs,
+    p_sub_choice = (p_complete_bfs * p_sub_choice_bfs) + (p_give_up * 1/2),
+    # To prevent log(0) = -Inf from showing up in the likelihoods, replace
+    # zeroes with the smallest non-zero value a computer can represent, aka
+    # machine-epsilon = 2.22e-16.  This is conceptually similar to estimating
+    # a small constant lapse rate, but without introducing any bias to
+    # nonzero probabilities.
+    p_sub_choice = if_else(p_sub_choice < 2.22e-16, 2.22e-16, p_sub_choice)
+  ) %>%
+  mutate(neg_ll = neg_loglik_logistic(p_sub_choice)) %>%
+  group_by(study, sub_id) %>%
+  summarise(neg_ll = sum(neg_ll), .groups = "drop")
+
+likelihoods_ideal_obs <- bind_rows(nav_study2, nav_study3) %>%
+  filter(measurement_id == "D2b") %>%
+  left_join(
+    params %>%
+      filter(model == "ideal_obs") %>%
+      pivot_wider(names_from = param_name, values_from = param_value) %>%
+      select(study, sub_id, softmax_temperature),
+    by = join_by(study, sub_id)
+  ) %>%
+  rowwise() %>%
+  mutate(
+    p_sub_choice = softmax(
+      option_values = c(opt1_distance, opt2_distance),
+      option_chosen = if_else(sub_choice == opt1_id, 1, 2),
+      temperature = softmax_temperature,
+      use_inverse_temperature = TRUE
+    )
+  ) %>%
+  ungroup() %>%
+  mutate(neg_ll = neg_loglik_logistic(p_sub_choice)) %>%
+  group_by(study, sub_id) %>%
+  summarise(neg_ll = sum(neg_ll), .groups = "drop")
+```
+
+For the SR, we'll assume asymptotic representation for the reevaluated network, using the exact same parameters that had previously been used for the original/learned network. We know that this will produce model predictions that are over-optimistic (especially for longer-distance problems), but if the SR continues to outperform model-based planning despite this, that would provide fairly strong evidence in favor of the SR.
+
+```{r ppc-sr-rep-asymptotic}
+ppc_sr_rep_asymptotic <- params %>%
+  filter(model == "sr_analytic") %>%
+  pivot_wider(names_from = param_name, values_from = param_value) %>%
+  select(study, sub_id, sr_gamma) %>%
+  rowwise() %>%
+  mutate(
+    predicted_sr = map(
+      .x = sr_gamma,
+      .f = ~build_successor_analytically(
+        transmat_reeval, successor_horizon = .x, normalize = TRUE
+      )
+    )
+  ) %>%
+  ungroup() %>%
+  select(study, sub_id, predicted_sr) %>%
+  unnest(predicted_sr)
+```
+
+```{r compute-likelihoods-sr}
+likelihoods_sr_asymptotic <- bind_rows(nav_study2, nav_study3) %>%
+  filter(measurement_id == "D2b") %>%
+  left_join(
+    params %>%
+      filter(model == "sr_analytic") %>%
+      pivot_wider(names_from = param_name, values_from = param_value) %>%
+      select(study, sub_id, sr_gamma, softmax_temperature),
+    by = join_by(study, sub_id)
+  ) %>%
+  left_join(
+    ppc_sr_rep_asymptotic %>%
+      select(
+        study, sub_id, endpoint_id = to, opt1_id = from, opt1_sr = sr_value
+      ),
+    by = join_by(study, sub_id, endpoint_id, opt1_id)
+  ) %>%
+  left_join(
+    ppc_sr_rep_asymptotic %>%
+      select(
+        study, sub_id, endpoint_id = to, opt2_id = from, opt2_sr = sr_value
+      ),
+    by = join_by(study, sub_id, endpoint_id, opt2_id)
+  ) %>%
+  rowwise() %>%
+  mutate(
+    p_sub_choice = softmax(
+      option_values = c(opt1_sr, opt2_sr),
+      option_chosen = if_else(sub_choice == opt1_id, 1, 2),
+      temperature = softmax_temperature,
+      use_inverse_temperature = TRUE
+    )
+  ) %>%
+  ungroup() %>%
+  mutate(
+    # Fix a few edge cases
+    p_sub_choice = if_else((is.nan(p_sub_choice) & correct), 1, p_sub_choice),
+    neg_ll = neg_loglik_logistic(p_sub_choice)
+  ) %>%
+  group_by(study, sub_id) %>%
+  summarise(neg_ll = sum(neg_ll), .groups = "drop")
+```
+
+## Likelihood weights
+
+Now that we have all of the likelihoods in hand, let's get a sense for how probable they are. We didn't fit any parameters in this procedure, so we'll work with the log-likelihoods directly. We can then compute "likelihood weights" that are directly analogous to Akaike weights.
+
+The plots below indicate that the SR is the most probable model in the set of candidate models.
+
+```{r oos-sr-vs-planning}
+oos_sr_vs_planning <- likelihoods_bfs_backward %>%
+  rename(bfs_backward = neg_ll) %>%
+  left_join(
+    likelihoods_bfs_forward %>% rename(bfs_forward = neg_ll),
+    by = join_by(study, sub_id)
+  ) %>%
+  left_join(
+    likelihoods_ideal_obs %>% rename(ideal_obs = neg_ll),
+    by = join_by(study, sub_id)
+  ) %>%
+  left_join(
+    likelihoods_sr_asymptotic %>% rename(sr = neg_ll),
+    by = join_by(study, sub_id)
+  ) %>%
+  pivot_longer(
+    c(ideal_obs, bfs_backward, bfs_forward, sr),
+    names_to = "model",
+    values_to = "neg_ll"
+  ) %>%
+  arrange(study, sub_id, neg_ll) %>%
+  group_by(study, sub_id) %>%
+  mutate(
+    # When computing Akaike weights, the relative likelihood is
+    # -1/2 * delta_aic because AIC is an unbiased estimator of likelihood
+    # times negative two (e.g., Wagenmakers & Farrell 2004).
+    # Here, we're not working w/ AIC, but the actual negative log-likelihoods
+    # themselves, so the scaling is just -1
+    relative_likelihood = exp(-1 * (neg_ll - min(neg_ll))),
+    likelihood_weight = relative_likelihood / sum(relative_likelihood)
+  ) %>%
+  ungroup()
+
+plot_oos_sr_vs_planning_pooled <- oos_sr_vs_planning %>%
+  group_by(model) %>%
+  summarise(likelihood_weight = mean(likelihood_weight), .groups = "drop") %>%
+  mutate(text = str_c(round(likelihood_weight, 2) * 100, "%")) %>%
+  ggplot(aes(x="1", y=likelihood_weight, fill=model)) +
+  theme_custom() +
+  geom_col() +
+  geom_text(aes(label = text), position = position_stack(vjust = 0.5)) +
+  scale_x_discrete(name = NULL) +
+  scale_y_continuous(
+    name = NULL,
+    expand = expansion(mult = c(0.01, 0.01))
+  ) +
+  scale_fill_manual(
+    name = NULL,
+    labels = c(
+      "bfs_backward" = "BFS-backward",
+      "bfs_forward" = "BFS-forward",
+      "ideal_obs" = "Ideal obs.",
+      "sr" = "Successor Rep."
+    ),
+    values = c(
+      "bfs_backward" = "#a6dba0",
+      "bfs_forward" = "#5aae61",
+      "ideal_obs" = "#1b7837",
+      "sr" = "#af8dc3"
+    )
+  ) +
+  theme(
+    legend.position = "bottom",
+    axis.text.x = element_blank(),
+    axis.ticks.x = element_blank(),
+    axis.text.y = element_blank(),
+    axis.ticks.y = element_blank()
+  ) +
+  ggtitle("Likelihood weights: SR vs model-based planning")
+
+plot_oos_sr_vs_planning_by_study <- oos_sr_vs_planning %>%
+  group_by(study, model) %>%
+  summarise(likelihood_weight = mean(likelihood_weight), .groups = "drop") %>%
+  mutate(text = str_c(round(likelihood_weight, 2) * 100, "%")) %>%
+  ggplot(aes(x=study, y=likelihood_weight, fill=model)) +
+  theme_custom() +
+  geom_col() +
+  geom_text(aes(label = text), position = position_stack(vjust = 0.5)) +
+  scale_x_discrete(name = NULL) +
+  scale_y_continuous(
+    name = NULL,
+    expand = expansion(mult = c(0.01, 0.01))
+  ) +
+  scale_fill_manual(
+    name = NULL,
+    labels = c(
+      "bfs_backward" = "BFS-backward",
+      "bfs_forward" = "BFS-forward",
+      "ideal_obs" = "Ideal obs.",
+      "sr" = "Successor Rep."
+    ),
+    values = c(
+      "bfs_backward" = "#a6dba0",
+      "bfs_forward" = "#5aae61",
+      "ideal_obs" = "#1b7837",
+      "sr" = "#af8dc3"
+    )
+  ) +
+  theme(
+    legend.position = "bottom",
+    axis.text.y = element_blank(),
+    axis.ticks.y = element_blank()
+  ) +
+  ggtitle("Likelihood weights: SR vs model-based planning")
+
+plot_oos_sr_vs_planning_pooled
+plot_oos_sr_vs_planning_by_study
+
+if (knitting) {
+  ggsave(
+    filename = here(
+      "outputs", workflow_name,
+      "out_of_sample_sr_vs_planning_pooled.pdf"
+    ),
+    plot = plot_oos_sr_vs_planning_pooled,
+    width = 5, height = 4, units = "in", dpi = 300
+  )
+  
+  ggsave(
+    filename = here(
+      "outputs", workflow_name,
+      "out_of_sample_sr_vs_planning_by_study.pdf"
+    ),
+    plot = plot_oos_sr_vs_planning_by_study,
+    width = 5, height = 4, units = "in", dpi = 300,
+    device = cairo_pdf
+  )
+}
+```
+
+## Proportion of subjects best-fit by each model
+
+We can also get a sense for what proportion of subjects are best-fit by each model, based solely on the largest log-likelihood.
+
+```{r plot-prop-best-fitting}
+plot_oos_best_fitting_model_per_sub <- oos_sr_vs_planning %>%
+  group_by(study, sub_id) %>%
+  slice_min(neg_ll) %>%
+  ungroup() %>%
+  select(study, sub_id, best_fitting_model = model) %>%
+  count(study, best_fitting_model) %>%
+  group_by(study) %>%
+  mutate(
+    p = n/sum(n),
+    text = str_c(round(p, 2) * 100, "%")
+  ) %>%
+  ungroup() %>%
+  ggplot(aes(x=study, y=p, fill=best_fitting_model)) +
+  theme_custom() +
+  geom_col() +
+  geom_text(aes(label = text), position = position_stack(vjust = 0.5)) +
+  scale_x_discrete(name = NULL) +
+  scale_y_continuous(
+    name = NULL,
+    expand = expansion(mult = c(0.01, 0.01))
+  ) +
+  scale_fill_manual(
+    name = NULL,
+    labels = c(
+      "bfs_backward" = "BFS-backward",
+      "bfs_forward" = "BFS-forward",
+      "ideal_obs" = "Ideal observer",
+      "sr" = "Successor Representation"
+    ),
+    values = c(
+      "bfs_backward" = "#a6dba0",
+      "bfs_forward" = "#5aae61",
+      "ideal_obs" = "#1b7837",
+      "sr" = "#af8dc3"
+    )
+  ) +
+  theme(
+    legend.position = "bottom",
+    axis.text.y = element_blank(),
+    axis.ticks.y = element_blank()
+  ) +
+  ggtitle("Proportion of subjects best fit by each model")
+
+plot_oos_best_fitting_model_per_sub
+```
+
+## PXP
+
+Finally, we can also compute the protected exceedance probability (PXP), using log-likelihood as our metric of evidence.
+
+```{r calc-oos-pxp}
+pxp_pooled <- likelihoods_bfs_backward %>%
+  rename(bfs_backward = neg_ll) %>%
+  left_join(
+    likelihoods_ideal_obs %>% rename(ideal_obs = neg_ll),
+    by = join_by(study, sub_id)
+  ) %>%
+  left_join(
+    likelihoods_bfs_forward %>% rename(bfs_forward = neg_ll),
+    by = join_by(study, sub_id)
+  ) %>%
+  left_join(
+    likelihoods_sr_asymptotic %>% rename(sr = neg_ll),
+    by = join_by(study, sub_id)
+  ) %>%
+  # Convert neg-ll to loglik
+  mutate(across(c(bfs_backward, bfs_forward, ideal_obs, sr), ~-.x)) %>%
+  select(-c(study, sub_id)) %>%
+  bayesian_model_selection()
+
+pxp_by_study <- likelihoods_bfs_backward %>%
+  rename(bfs_backward = neg_ll) %>%
+  left_join(
+    likelihoods_ideal_obs %>% rename(ideal_obs = neg_ll),
+    by = join_by(study, sub_id)
+  ) %>%
+  left_join(
+    likelihoods_bfs_forward %>% rename(bfs_forward = neg_ll),
+    by = join_by(study, sub_id)
+  ) %>%
+  left_join(
+    likelihoods_sr_asymptotic %>% rename(sr = neg_ll),
+    by = join_by(study, sub_id)
+  ) %>%
+  # Convert neg-ll to loglik
+  mutate(across(c(bfs_backward, bfs_forward, ideal_obs, sr), ~-.x)) %>%
+  group_by(study) %>%
+  nest() %>%
+  mutate(
+    test = map(
+      .x = data,
+      .f = ~.x %>%
+        select(-sub_id) %>%
+        bayesian_model_selection()
+    )
+  ) %>%
+  ungroup() %>%
+  select(-data) %>%
+  unnest(test)
+```
+
+This too points to the SR as the best-fitting model in the set, regardless of whether we pool over the two studies or not (though of course it's also clear that the PXP is much higher when pooling).
+
+```{r plot-oos-pxp}
+plot_pxp_pooled <- pxp_pooled %>%
+  mutate(
+    text = round(pxp, 3),
+    text = if_else(text < .01, "", as.character(text))
+  ) %>%
+  ggplot(aes(x="1", y=pxp, fill=model)) +
+  theme_custom() +
+  geom_col() +
+  geom_text(aes(label = text), position = position_stack(vjust = 0.5)) +
+  scale_x_discrete(name = NULL) +
+  scale_y_continuous(
+    name = NULL,
+    expand = expansion(mult = c(0.01, 0.01))
+  ) +
+  scale_fill_manual(
+    name = NULL,
+    labels = c(
+      "bfs_backward" = "BFS-backward",
+      "bfs_forward" = "BFS-forward",
+      "ideal_obs" = "Ideal obs.",
+      "sr" = "Successor Rep."
+    ),
+    values = c(
+      "bfs_backward" = "#a6dba0",
+      "bfs_forward" = "#5aae61",
+      "ideal_obs" = "#1b7837",
+      "sr" = "#af8dc3"
+    )
+  ) +
+  theme(
+    legend.position = "bottom",
+    axis.text.x = element_blank(),
+    axis.ticks.x = element_blank(),
+    axis.text.y = element_blank(),
+    axis.ticks.y = element_blank()
+  ) +
+  ggtitle("PXP")
+
+plot_pxp_by_study <- pxp_by_study %>%
+  mutate(text = round(pxp, 3)) %>%
+  ggplot(aes(x=study, y=pxp, fill=model)) +
+  theme_custom() +
+  geom_col() +
+  geom_text(aes(label = text), position = position_stack(vjust = 0.5)) +
+  scale_x_discrete(name = NULL) +
+  scale_y_continuous(
+    name = NULL,
+    expand = expansion(mult = c(0.01, 0.01))
+  ) +
+  scale_fill_manual(
+    name = NULL,
+    labels = c(
+      "bfs_backward" = "BFS-backward",
+      "bfs_forward" = "BFS-forward",
+      "ideal_obs" = "Ideal obs.",
+      "sr" = "Successor Rep."
+    ),
+    values = c(
+      "bfs_backward" = "#a6dba0",
+      "bfs_forward" = "#5aae61",
+      "ideal_obs" = "#1b7837",
+      "sr" = "#af8dc3"
+    )
+  ) +
+  theme(
+    legend.position = "bottom",
+    axis.text.y = element_blank(),
+    axis.ticks.y = element_blank()
+  ) +
+  ggtitle("PXP")
+
+plot_pxp_pooled
+plot_pxp_by_study
+
+if (knitting) {
+  ggsave(
+    filename = here(
+      "outputs", workflow_name,
+      "out_of_sample_pxp_pooled.pdf"
+    ),
+    plot = plot_pxp_pooled,
+    width = 5, height = 4, units = "in", dpi = 300
+  )
+  
+  ggsave(
+    filename = here(
+      "outputs", workflow_name,
+      "out_of_sample_pxp_by_study.pdf"
+    ),
+    plot = plot_pxp_by_study,
+    width = 5, height = 4, units = "in", dpi = 300
+  )
+}
+```
+
+
+# Models of transition reevaluation
+
+So far, we know the following:
+
+- Subjects behaviorally demonstrate decreased accuracy following transition reevaluation
+- Out-of-sample prediction indicates that the SR is the best-fitting model
+
+Although out-of-sample prediction allows us to conclude that the SR best explains subjects' navigation performance following transition reevaluation, it doesn't provide mechanistic insights into the empirically-observed decline in navigation accuracy. Therefore, we'll need to test whether/how cached representation could account for this.
+
+In the transition reevaluation task, subjects were simply shown an on-screen text instruction that two individuals (nodes 1 and 2) had stopped being friends. Subjects were then instructed that two individuals (nodes 7 and 13) had newly become friends. Immediately afterwards, subjects completed the message-passing task with a new set of trials based on the reevaluated ne90twork.
+
+In response to transition reevaluation, an SR-agent could do one of three things:
+
+1. Do nothing, and continue using the cached representation of the network that had originally been learned. This would result in worse navigation accuracy, as the cached representation no longer reflects the multistep structure of the reevaluated network.
+
+2. Perform a "single-shot" update in response to "observing" the dissolution of one friendship and the formation of another. Depending on the learning rate used to update the representation, this would enable more accurate navigation.
+
+3. Replay the reevaluated network.
+
+In the simulations, we'll examine how accurately an agent is able to solve the reevaluated navigation problems, depending on its learning rate (assuming "single-shot" observation) or how much replay it engages in (assuming multiple replayed observations).
+
+For a fully-analytic SR-agent, we assume that the agent is doing some kind of "off-policy" updating: learning an estimate of the true transition probabilities, then using this transition matrix to recompute the SR. This can be accomplished simply by using a delta-rule updating mechanism with the gamma term fixed at zero. It may be the case that this allows an agent to quickly and flexibly respond to transition reevaluation.
+
+For a delta-rule SR-agent, we assume that the agent continues doing what it does.
+
+We'll start by simulating the asymptotic representation of the original/learned network.
+
+```{r sim-rep-before-tr}
+sim_rep_gamma0_before_tr <- build_successor_td_0(
+  successor_matrix = diag(nrow = 13, ncol = 13),
+  observation_matrix = sr_obs %>%
+    filter(iter <= 100) %>%
+    select(from, to) %>%
+    as.matrix(),
+  sr_alpha = 0.1,
+  sr_gamma = 0,
+  bidirectional = TRUE
+)
+
+# Note: this is still a matrix of counts, NOT probabilities!
+# Convert to a probability matrix before simulating navigation
+sim_rep_delta_rule_before_tr <- map_dfr(
+  .x = seq(0.1, 0.9, 0.1),
+  .f = ~build_successor_td_0(
+    successor_matrix = diag(nrow = 13, ncol = 13),
+    observation_matrix = sr_obs %>%
+        filter(iter <= 100) %>%
+        select(from, to) %>%
+      as.matrix(),
+    sr_alpha = 0.1,
+    sr_gamma = .x,
+    bidirectional = TRUE
+  )
+)
+```
+
+
+# Simulation: "Single-shot" updating
+
+In the transition reevaluation, nodes 1 and 2 stopped being friends. The SR's core updating mechanism is one that encodes the co-occurrence of two entities, making it a little trickier to encode the *absence* of co-occurrence. To update estimates of transition probabilities following a "friend breakup", the agent might therefore encode "observations" of the two nodes' friendships $(1 \rightarrow 8), \space (2 \rightarrow 3), \space (2 \rightarrow 4)$, excluding the broken relationship $(1 \rightarrow 2)$.
+
+Subjects were then instructed that two individuals (nodes 7 and 13) had newly become friends. This update is fairly straightforward to encode, $(7 \rightarrow 13)$.
+
+We'll therefore assume that the friend breakup produced three "observations", and that the new friendship produced one observation.
+
+In the simulations, we'll test how different learning rates impact navigation accuracy. The intuition is that a surprising set of observations (like the sudden dissolution and/or formation of friendships) drives greater updating, which can be captured by the learning rate parameter.
+
+```{r sim-rep-after-tr-single-shot}
+sim_rep_analytic_after_tr_single_shot <- expand_grid(
+  sr_gamma = seq(0.1, 0.9, 0.1),
+  sr_alpha = seq(0, 0.9, 0.1)
+) %>%
+  rowwise() %>%
+  mutate(
+    sr = map(
+      .x = sr_gamma,
+      .f = ~build_successor_analytically(
+        # All of this is the first argument for the analytic SR!
+        # TD-update to incorporate observations from reevaluation
+        transition_matrix = build_successor_td_0(
+          # Prior: gamma-0 SR learned before transition reevaluation
+          successor_matrix = sim_rep_gamma0_before_tr %>%
+            select(from, to, sr_value) %>%
+            pivot_wider(names_from = to, values_from = sr_value) %>%
+            column_to_rownames("from") %>%
+            as.matrix(),
+          # Observations: transition reevaluation
+          observation_matrix = tribble(
+            ~from, ~to,
+            1, 8,
+            2, 3,
+            2, 4,
+            7, 13,
+          ) %>% as.matrix(),
+          # Remaining args for TD SR
+          sr_alpha = sr_alpha,
+          sr_gamma = 0,
+          bidirectional = TRUE
+        ) %>%
+          select(from, to, sr_value) %>%
+          pivot_wider(names_from = to, values_from = sr_value) %>%
+          column_to_rownames("from") %>%
+          as.matrix(),
+        # Remaining args for analytic SR
+        successor_horizon = .x,
+        normalize = TRUE
+      ) %>% select(-sr_gamma)
+    )
+  ) %>%
+  ungroup() %>%
+  unnest(sr)
+
+sim_rep_delta_rule_after_tr_single_shot <- expand_grid(
+  sr_alpha = seq(0, 0.9, 0.1),
+  sim_rep_delta_rule_before_tr %>% select(-sr_alpha)
+) %>%
+  group_by(sr_gamma, sr_alpha) %>%
+  nest() %>%
+  mutate(
+    updated_sr = map(
+      .x = data,
+      .f = ~build_successor_td_0(
+        # Prior: delta-rule SR learned before transition reevaluation
+        successor_matrix = .x %>%
+          select(from, to, sr_value) %>%
+          pivot_wider(names_from = to, values_from = sr_value) %>%
+          column_to_rownames("from") %>%
+          as.matrix(),
+        # Observations: transition reevaluation
+        observation_matrix = tribble(
+          ~from, ~to,
+          1, 8,
+          2, 3,
+          2, 4,
+          7, 13,
+        ) %>% as.matrix(),
+        # Remaining args for delta-rule SR
+        sr_alpha = sr_alpha,
+        sr_gamma = sr_gamma,
+        bidirectional = TRUE
+      ) %>%
+        # Convert from counts to probabilities
+        mutate(sr_value = sr_value * (1-sr_gamma)) %>%
+        select(-c(sr_gamma, sr_alpha))
+    )
+  ) %>%
+  ungroup() %>%
+  select(-data) %>%
+  unnest(updated_sr)
+```
+
+```{r sim-nav-after-tr-single-shot}
+sim_nav_analytic_after_tr_single_shot <- expand_grid(
+  sr_gamma = seq(0.1, 0.9, 0.1),
+  sr_alpha = seq(0, 0.9, 0.1),
+  nav_trials_reeval
+) %>%
+  left_join(
+    sim_rep_analytic_after_tr_single_shot %>%
+      rename(endpoint_id = to, opt1_id = from, opt1_sr = sr_value),
+    by = join_by(sr_gamma, sr_alpha, endpoint_id, opt1_id)
+  ) %>%
+  left_join(
+    sim_rep_analytic_after_tr_single_shot %>%
+      rename(endpoint_id = to, opt2_id = from, opt2_sr = sr_value),
+    by = join_by(sr_gamma, sr_alpha, endpoint_id, opt2_id)
+  ) %>%
+  rowwise() %>%
+  mutate(
+    p_correct = softmax(
+      option_values = c(opt1_sr, opt2_sr),
+      option_chosen = if_else(opt1_id == correct_choice, 1, 2),
+      temperature = 100,
+      use_inverse_temperature = TRUE
+    )
+  ) %>%
+  ungroup()
+
+sim_nav_delta_rule_after_tr_single_shot <- expand_grid(
+  sr_gamma = seq(0.1, 0.9, 0.1),
+  sr_alpha = seq(0, 0.9, 0.1),
+  nav_trials_reeval
+) %>%
+  left_join(
+    sim_rep_delta_rule_after_tr_single_shot %>%
+      rename(endpoint_id = to, opt1_id = from, opt1_sr = sr_value),
+    by = join_by(sr_gamma, sr_alpha, endpoint_id, opt1_id)
+  ) %>%
+  left_join(
+    sim_rep_delta_rule_after_tr_single_shot %>%
+      rename(endpoint_id = to, opt2_id = from, opt2_sr = sr_value),
+    by = join_by(sr_gamma, sr_alpha, endpoint_id, opt2_id)
+  ) %>%
+  rowwise() %>%
+  mutate(
+    p_correct = softmax(
+      option_values = c(opt1_sr, opt2_sr),
+      option_chosen = if_else(opt1_id == correct_choice, 1, 2),
+      temperature = 100,
+      use_inverse_temperature = TRUE
+    )
+  ) %>%
+  ungroup()
+```
+
+In the plot below, the black line reflects predicted transition reevaluation accuracy for an agent that does *not* update (i.e., alpha = 0), which serves as a reference point for agents that do any amount of updating. We can see that a non-updating agent has chance-level (or even below-chance) accuracy on distance-4 trials.
+
+Agents that do *any* amount of updating demonstrate some amount of improvement on the longer-distance problems (i.e., distance-3 and -4), aside from agents with the lowest values of gamma. In the best-case scenario, a single-shot update can produce surprisingly large gains in longer-distance accuracy. Of course, these agents are far from achieving ceiling-level accuracy, but these results demonstrate that an SR-agent can achieve above-chance navigation accuracy simply by encoding what was instructed during the transition reevaluation procedure. Therefore, single-shot updating is sufficient for explaining how humans could achieve above-chance accuracy after transition reevaluation.
+
+Note that we're only showing one set of simulations here, when the softmax inverse temperature is set to 100. At least using the analytic implementation, the SR-agent is able to achieve near-ceiling accuracy when the inverse temperature is larger.
+
+```{r plot-nav-after-tr-single-shot}
+plot_nav_analytic_after_tr_single_shot <- 
+  sim_nav_analytic_after_tr_single_shot %>%
+  filter(sr_alpha != 0) %>%
+  group_by(sr_gamma, sr_alpha, shortest_path) %>%
+  summarise(accuracy = mean(p_correct), .groups = "drop") %>%
+  mutate(
+    sr_gamma = str_c(unicode_greek["gamma"], " = ", sr_gamma),
+    sr_alpha = factor(sr_alpha)
+  ) %>%
+  ggplot(aes(x=shortest_path, y=accuracy, color = sr_alpha)) +
+  theme_custom() +
+  facet_wrap(~sr_gamma) +
+  geom_hline(yintercept = 0.5, linetype = "dashed") +
+  # No updating
+  geom_line(
+    aes(group = 1),
+    data = sim_nav_analytic_after_tr_single_shot %>%
+      filter(sr_alpha == 0) %>%
+      group_by(sr_gamma, sr_alpha, shortest_path) %>%
+      summarise(accuracy = mean(p_correct), .groups = "drop") %>%
+      mutate(
+        sr_gamma = str_c(unicode_greek["gamma"], " = ", sr_gamma),
+        sr_alpha = factor(sr_alpha)
+      ),
+    linewidth = 0.8, color = "black"
+  ) +
+  # Some updating
+  geom_line(aes(group = sr_alpha), linewidth = 0.8) +
+  scale_color_carto_d(
+    name = str_c(unicode_greek["alpha"], " ="), palette = "Geyser"
+  ) +
+  scale_x_discrete(name = "Shortest path distance") +
+  scale_y_continuous(name = "Accuracy", labels = scales::percent) +
+  coord_cartesian(ylim = c(0.4, 1)) +
+  ggtitle("Analytic SR") +
+  guides(color = guide_legend(byrow = TRUE, nrow = 1)) +
+  theme(legend.position = "bottom")
+
+plot_nav_delta_rule_after_tr_single_shot <-
+  sim_nav_delta_rule_after_tr_single_shot %>%
+  filter(sr_alpha != 0) %>%
+  group_by(sr_gamma, sr_alpha, shortest_path) %>%
+  summarise(accuracy = mean(p_correct), .groups = "drop") %>%
+  mutate(
+    sr_gamma = str_c(unicode_greek["gamma"], " = ", sr_gamma),
+    sr_alpha = factor(sr_alpha)
+  ) %>%
+  ggplot(aes(x=shortest_path, y=accuracy, color = sr_alpha)) +
+  theme_custom() +
+  facet_wrap(~sr_gamma) +
+  geom_hline(yintercept = 0.5, linetype = "dashed") +
+  # No updating
+  geom_line(
+    aes(group = 1),
+    data = sim_nav_delta_rule_after_tr_single_shot %>%
+      filter(sr_alpha == 0) %>%
+      group_by(sr_gamma, sr_alpha, shortest_path) %>%
+      summarise(accuracy = mean(p_correct), .groups = "drop") %>%
+      mutate(
+        sr_gamma = str_c(unicode_greek["gamma"], " = ", sr_gamma),
+        sr_alpha = factor(sr_alpha)
+      ),
+    linewidth = 0.8, color = "black"
+  ) +
+  # Some updating
+  geom_line(aes(group = sr_alpha), linewidth = 0.8) +
+  scale_color_carto_d(
+    name = str_c(unicode_greek["alpha"], " ="), palette = "Geyser"
+  ) +
+  scale_x_discrete(name = "Shortest path distance") +
+  scale_y_continuous(name = "Accuracy", labels = scales::percent) +
+  coord_cartesian(ylim = c(0.4, 1)) +
+  ggtitle("Delta-rule SR") +
+  guides(color = guide_legend(byrow = TRUE, nrow = 1)) +
+  theme(legend.position = "bottom")
+
+plot_nav_after_tr_single_shot <- wrap_plots(
+  plot_nav_analytic_after_tr_single_shot,
+  plot_nav_delta_rule_after_tr_single_shot,
+  nrow = 1,
+  guides = "collect"
+) +
+  plot_annotation(
+    title = str_c(
+      "Predicted navigation accuracy after transition reevaluation",
+      "\n",
+      "(\"Single-shot\" update)"
+    ),
+    theme = theme(plot.title = element_text(hjust = 0.5))
+  ) &
+  theme(legend.position = "bottom")
+
+plot_nav_after_tr_single_shot
+
+if (knitting) {
+  ggsave(
+    filename = here(
+      "outputs", workflow_name,
+      "sim_nav_after_tr_single_shot.pdf"
+    ),
+    plot = plot_nav_after_tr_single_shot,
+    width = 8, height = 6, units = "in", dpi = 300,
+    device = cairo_pdf
+  )
+  
+  ggsave(
+    filename = here(
+      "outputs", workflow_name,
+      "sim_nav_after_tr_single_shot_analytic.pdf"
+    ),
+    plot = plot_nav_analytic_after_tr_single_shot +
+      ggtitle("Predicted navigation accuracy after transition reevaluation"),
+    width = 6, height = 6, units = "in", dpi = 300,
+    device = cairo_pdf
+  )
+  
+  ggsave(
+    filename = here(
+      "outputs", workflow_name,
+      "sim_nav_after_tr_single_shot_delta_rule.pdf"
+    ),
+    plot = plot_nav_delta_rule_after_tr_single_shot +
+      ggtitle("Predicted navigation accuracy after transition reevaluation"),
+    width = 6, height = 6, units = "in", dpi = 300,
+    device = cairo_pdf
+  )
+}
+```
+
+
+# Simulation: Replay-based updating
+
+If a single-shot update is sufficient for above-chance navigation, how much can subsequent replay help? To test this, we're treating replay as an off-policy "sweep" through all (reevaluated) pairs, just as we've treated replay in past analyses. The difference is that we're starting from an asymptotic representation of the network that was originally learned, rather than from an uninformative prior.
+
+To perform these simulations, we'll first generate many replay events, i.e. replayed observations of node-pairs after reevaluation.
+
+```{r sr-obs-reeval}
+set.seed(sum(utf8ToInt("we came to see time is taller than space is wide")))
+
+sr_obs_reeval <- expand_grid(
+  iter = 1:100,
+  adjlist_reeval %>%
+    filter(edge == 1) %>%
+    select(from, to)
+) %>%
+  group_by(iter) %>%
+  slice_sample(prop = 1) %>%
+  ungroup()
+```
+
+In our simulations, we'll assume that the agent maintains the same learning rate (alpha = 0.1), and test how navigation accuracy is shaped by the number of replay events/sweeps the agent is able to accomplish prior to solving navigation problems.
+
+```{r sim-rep-after-tr-replay}
+sim_rep_analytic_after_tr_replay <- expand_grid(
+  sr_gamma = seq(0.1, 0.9, 0.1),
+  n_iter = c(1, 5, 10, 20, 50, 100)
+) %>%
+  rowwise() %>%
+  mutate(
+    updated_sr = map(
+      .x = n_iter,
+      .f = ~build_successor_analytically(
+        # All of this is the first argument for the analytic SR!
+        # TD-update to incorporate observations from reevaluation/replay
+        transition_matrix = build_successor_td_0(
+          # Prior: gamma-0 SR learned before transition reevaluation
+          successor_matrix = sim_rep_gamma0_before_tr %>%
+            select(from, to, sr_value) %>%
+            pivot_wider(names_from = to, values_from = sr_value) %>%
+            column_to_rownames("from") %>%
+            as.matrix(),
+          # Observations: transition reevaluation / replay
+          observation_matrix = sr_obs_reeval %>%
+            filter(iter <= .x) %>%
+            select(from, to) %>%
+            as.matrix(),
+          # Remaining args for TD SR
+          sr_alpha = 0.1,
+          sr_gamma = 0,
+          bidirectional = TRUE
+        ) %>%
+          select(from, to, sr_value) %>%
+          pivot_wider(names_from = to, values_from = sr_value) %>%
+          column_to_rownames("from") %>%
+          as.matrix(),
+        # Remaining args for analytic SR
+        successor_horizon = sr_gamma,
+        normalize = TRUE
+      ) %>% select(-sr_gamma)
+    )
+  ) %>%
+  ungroup() %>%
+  unnest(updated_sr)
+
+sim_rep_delta_rule_after_tr_replay <- expand_grid(
+  n_iter = c(1, 5, 10, 20, 50, 100),
+  sim_rep_delta_rule_before_tr %>% select(-sr_alpha)
+) %>%
+  group_by(n_iter, sr_gamma) %>%
+  nest() %>%
+  mutate(
+    updated_sr = map(
+      .x = data,
+      .f = ~build_successor_td_0(
+        # Prior: delta-rule SR learned before transition reevaluation
+        successor_matrix = .x %>%
+          select(from, to, sr_value) %>%
+          pivot_wider(names_from = to, values_from = sr_value) %>%
+          column_to_rownames("from") %>%
+          as.matrix(),
+        # Observations: transition reevaluation / replay
+          observation_matrix = sr_obs_reeval %>%
+            filter(iter <= n_iter) %>%
+            select(from, to) %>%
+            as.matrix(),
+        # Remaining args for delta-rule SR
+        sr_alpha = 0.1,
+        sr_gamma = sr_gamma,
+        bidirectional = TRUE
+      ) %>%
+        # Convert from counts to probabilities
+        mutate(sr_value = sr_value * (1-sr_gamma)) %>%
+        select(-c(sr_gamma, sr_alpha))
+    )
+  ) %>%
+  ungroup() %>%
+  select(-data) %>%
+  unnest(updated_sr)
+```
+
+```{r sim-nav-after-tr-replay}
+sim_nav_analytic_after_tr_replay <- expand_grid(
+  n_iter = c(1, 5, 10, 100),
+  sr_gamma = seq(0.1, 0.9, 0.1),
+  nav_trials_reeval
+) %>%
+  left_join(
+    sim_rep_analytic_after_tr_replay %>%
+      rename(endpoint_id = to, opt1_id = from, opt1_sr = sr_value),
+    by = join_by(n_iter, sr_gamma, endpoint_id, opt1_id)
+  ) %>%
+  left_join(
+    sim_rep_analytic_after_tr_replay %>%
+      rename(endpoint_id = to, opt2_id = from, opt2_sr = sr_value),
+    by = join_by(n_iter, sr_gamma, endpoint_id, opt2_id)
+  ) %>%
+  rowwise() %>%
+  mutate(
+    p_correct = softmax(
+      option_values = c(opt1_sr, opt2_sr),
+      option_chosen = if_else(opt1_id == correct_choice, 1, 2),
+      temperature = 100,
+      use_inverse_temperature = TRUE
+    )
+  ) %>%
+  ungroup()
+
+sim_nav_delta_rule_after_tr_replay <- expand_grid(
+  n_iter = c(1, 5, 10, 100),
+  sr_gamma = seq(0.1, 0.9, 0.1),
+  nav_trials_reeval
+) %>%
+  left_join(
+    sim_rep_delta_rule_after_tr_replay %>%
+      rename(endpoint_id = to, opt1_id = from, opt1_sr = sr_value),
+    by = join_by(n_iter, sr_gamma, endpoint_id, opt1_id)
+  ) %>%
+  left_join(
+    sim_rep_delta_rule_after_tr_replay %>%
+      rename(endpoint_id = to, opt2_id = from, opt2_sr = sr_value),
+    by = join_by(n_iter, sr_gamma, endpoint_id, opt2_id)
+  ) %>%
+  rowwise() %>%
+  mutate(
+    p_correct = softmax(
+      option_values = c(opt1_sr, opt2_sr),
+      option_chosen = if_else(opt1_id == correct_choice, 1, 2),
+      temperature = 100,
+      use_inverse_temperature = TRUE
+    )
+  ) %>%
+  ungroup()
+```
+
+Unsurprisingly, accuracy for longer-distance problems improves with greater replay. We find, additionally, that even a relatively small amount of replay can make a big difference. There are only 17 (undirected) friendships in the reevaluated network, so we can imagine that an SR-agent might be able to fit a few iterations of replay into the time between getting the instructions, and starting the navigation task. Note that we're only showing one set of simulations here, when the softmax inverse temperature is set to 100; the agent is able to achieve near-ceiling accuracy when the inverse temperature is larger.
+
+```{r plot-nav-after-tr-replay}
+plot_nav_analytic_after_tr_replay <- sim_nav_analytic_after_tr_replay %>%
+  group_by(n_iter, sr_gamma, shortest_path) %>%
+  summarise(accuracy = mean(p_correct), .groups = "drop") %>%
+  mutate(
+    sr_gamma = str_c(unicode_greek["gamma"], " = ", sr_gamma),
+    n_iter = factor(n_iter)
+  ) %>%
+  ggplot(aes(x=shortest_path, y=accuracy, color = n_iter)) +
+  theme_custom() +
+  facet_wrap(~sr_gamma) +
+  geom_hline(yintercept = 0.5, linetype = "dashed") +
+  # No updating
+  geom_line(
+    aes(group = 1),
+    data = sim_nav_analytic_after_tr_single_shot %>%
+      filter(sr_alpha == 0) %>%
+      group_by(sr_gamma, sr_alpha, shortest_path) %>%
+      summarise(accuracy = mean(p_correct), .groups = "drop") %>%
+      mutate(
+        sr_gamma = str_c(unicode_greek["gamma"], " = ", sr_gamma),
+        sr_alpha = factor(sr_alpha)
+      ),
+    linewidth = 0.8, color = "black"
+  ) +
+  # Some updating
+  geom_line(aes(group = n_iter), linewidth = 0.8) +
+  scale_color_manual(
+    name = "# Replay iterations",
+    values = c("#85c4c9", "#68abb8", "#4f90a6", "#2a5674")
+  ) +
+  scale_x_discrete(name = "Shortest path distance") +
+  scale_y_continuous(name = "Accuracy", labels = scales::percent) +
+  coord_cartesian(ylim = c(0.4, 1)) +
+  ggtitle("Analytic SR") +
+  guides(color = guide_legend(byrow = TRUE, nrow = 1)) +
+  theme(legend.position = "bottom")
+
+plot_nav_delta_rule_after_tr_replay <- sim_nav_delta_rule_after_tr_replay %>%
+  group_by(n_iter, sr_gamma, shortest_path) %>%
+  summarise(accuracy = mean(p_correct), .groups = "drop") %>%
+  mutate(
+    sr_gamma = str_c(unicode_greek["gamma"], " = ", sr_gamma),
+    n_iter = factor(n_iter)
+  ) %>%
+  ggplot(aes(x=shortest_path, y=accuracy, color = n_iter)) +
+  theme_custom() +
+  facet_wrap(~sr_gamma) +
+  geom_hline(yintercept = 0.5, linetype = "dashed") +
+  # No updating
+  geom_line(
+    aes(group = 1),
+    data = sim_nav_delta_rule_after_tr_single_shot %>%
+      filter(sr_alpha == 0) %>%
+      group_by(sr_gamma, sr_alpha, shortest_path) %>%
+      summarise(accuracy = mean(p_correct), .groups = "drop") %>%
+      mutate(
+        sr_gamma = str_c(unicode_greek["gamma"], " = ", sr_gamma),
+        sr_alpha = factor(sr_alpha)
+      ),
+    linewidth = 0.8, color = "black"
+  ) +
+  # Some updating
+  geom_line(aes(group = n_iter), linewidth = 0.8) +
+  scale_color_manual(
+    name = "# Replay iterations",
+    values = c("#85c4c9", "#68abb8", "#4f90a6", "#2a5674")
+  ) +
+  scale_x_discrete(name = "Shortest path distance") +
+  scale_y_continuous(name = "Accuracy", labels = scales::percent) +
+  coord_cartesian(ylim = c(0.4, 1)) +
+  ggtitle("Delta-rule SR") +
+  guides(color = guide_legend(byrow = TRUE, nrow = 1)) +
+  theme(legend.position = "bottom")
+
+plot_nav_after_tr_replay <- wrap_plots(
+  plot_nav_analytic_after_tr_replay,
+  plot_nav_delta_rule_after_tr_replay,
+  nrow = 1,
+  guides = "collect"
+) +
+  plot_annotation(
+    title = str_c(
+      "Predicted navigation accuracy after transition reevaluation",
+      "\n",
+      "(\"Replayed\" update)"
+    ),
+    theme = theme(plot.title = element_text(hjust = 0.5))
+  ) &
+  theme(legend.position = "bottom")
+
+plot_nav_after_tr_replay
+
+if (knitting) {
+  ggsave(
+    filename = here(
+      "outputs", workflow_name,
+      "sim_nav_after_tr_replay.pdf"
+    ),
+    plot = plot_nav_after_tr_replay,
+    width = 8, height = 6, units = "in", dpi = 300,
+    device = cairo_pdf
+  )
+  
+  ggsave(
+    filename = here(
+      "outputs", workflow_name,
+      "sim_nav_after_tr_replay_analytic.pdf"
+    ),
+    plot = plot_nav_analytic_after_tr_replay +
+      ggtitle("Predicted navigation accuracy after transition reevaluation"),
+    width = 6, height = 6, units = "in", dpi = 300,
+    device = cairo_pdf
+  )
+  
+  ggsave(
+    filename = here(
+      "outputs", workflow_name,
+      "sim_nav_after_tr_replay_delta_rule.pdf"
+    ),
+    plot = plot_nav_delta_rule_after_tr_replay +
+      ggtitle("Predicted navigation accuracy after transition reevaluation"),
+    width = 6, height = 6, units = "in", dpi = 300,
+    device = cairo_pdf
+  )
+}
+```
+
