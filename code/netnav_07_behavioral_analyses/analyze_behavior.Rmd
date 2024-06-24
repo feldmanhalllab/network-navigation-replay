@@ -238,9 +238,9 @@ plot_nav_day1 <- nav_day1 %>%
   ) +
   scale_x_discrete(name = "Shortest path distance") +
   scale_y_continuous(
-    name = "Accuracy", labels = scales::percent, breaks = seq(0, 1, 0.1)
+    name = "Accuracy", labels = scales::percent, breaks = seq(0, 1, 0.25)
   ) +
-  coord_cartesian(ylim = c(0.4, 1.1)) +
+  coord_cartesian(ylim = c(0.2, 1.1)) +
   theme(legend.position = "bottom") +
   ggtitle("Human social navigation")
 
@@ -387,7 +387,7 @@ plot_nav_day1_to_day2 <- nav_day1_to_day2 %>%
     labels = c("D1"="Before rest", "D2"="After overnight rest")
   ) +
   scale_fill_manual(values = c("D1"="#fa9fb5", "D2"="#7a0177")) +
-  coord_cartesian(ylim = c(0.3, 1.1)) +
+  coord_cartesian(ylim = c(0.25, 1.1)) +
   theme(legend.position = "bottom") +
   ggtitle("Navigation after overnight rest")
 
@@ -505,7 +505,7 @@ plot_nav_awake <- nav_study3 %>%
     labels = c("D1"="Before rest", "D1b"="After awake rest")
   ) +
   scale_fill_manual(values = c("D1"="#fa9fb5", "D1b"="#2c7fb8")) +
-  coord_cartesian(ylim = c(0.3, 1.1)) +
+  coord_cartesian(ylim = c(0.25, 1.1)) +
   theme(legend.position = "bottom") +
   ggtitle("Navigation after awake rest")
 
