@@ -1,0 +1,841 @@
+---
+title: "Figure 4"
+output:
+  html_document:
+    code_download: true
+    code_folding: hide
+    toc: true
+    toc_float:
+      collapsed: true
+---
+
+# Disclaimer
+
+This script has one purpose only, which is to assemble a figure for the main text. This is all cobbled together from code from previous workflows, and is not meant to be elegant or expository.
+
+# Setup
+
+```{r libraries}
+library(tidyverse)
+library(here)
+library(patchwork)
+
+library(glmmTMB)
+library(broom.mixed)
+
+source(here("code", "utils", "modeling_utils.R"))
+source(here("code", "utils", "representation_utils.R"))
+source(here("code", "utils", "bayesian_model_selection.R"))
+
+source(here("code", "utils", "ggplot_themes.R"))
+source(here("code", "utils", "unicode_greek.R"))
+
+knitting <- knitr::is_html_output()
+
+create_path <- function(this_path) {
+  if (!dir.exists(this_path)) {
+    dir.create(this_path, recursive = TRUE)
+  }
+}
+
+predict_glmmTMB <- function(make_predictions_for, model_object) {
+  make_predictions_for %>%
+    bind_cols(
+      predict(
+        object = model_object,
+        newdata = .,
+        re.form = NA, allow.new.levels = TRUE, se.fit = TRUE, type = "response"
+      )
+    )
+}
+
+if (knitting) {
+  here("figures") %>%
+    create_path()
+}
+```
+
+```{r load-behav}
+nav_study2 <- here("data", "clean_data", "study2_message_passing.csv") %>%
+  read_csv(show_col_types = FALSE) %>%
+  filter(
+    two_correct_options == FALSE,
+    shortest_path_given_opts == shortest_path_given_start_end
+  ) %>%
+  mutate(
+    study = "Study 2",
+    measurement_id = case_when(
+      network == "learned" ~ str_c("D", measurement_id),
+      network == "reevaluated" ~ "D2b"
+    ),
+    shortest_path = factor(shortest_path_given_opts)
+  ) %>%
+  select(
+    study, sub_id, measurement_id, shortest_path,
+    startpoint_id, endpoint_id,
+    opt1_id, opt2_id,
+    correct_choice, sub_choice,
+    correct, rt,
+    one_impossible_option,
+    opt1_distance = dist_opt1,
+    opt2_distance = dist_opt2
+  ) %>%
+  # Replace undefined distances (corresponding to impossible options)
+  # so that the softmax gets non-NA inputs; we assume that impossible
+  # options are just as bad as the longest distance found in this set
+  # of trials, i.e., a distance of 8
+  mutate(across(c(opt1_distance, opt2_distance), ~replace_na(.x, 8)))
+
+nav_study3 <- here("data", "clean_data", "study3_message_passing.csv") %>%
+  read_csv(show_col_types = FALSE) %>%
+  filter(
+    two_correct_options == FALSE,
+    shortest_path_given_opts == shortest_path_given_start_end
+  ) %>%
+  mutate(
+    study = "Study 3",
+    measurement_id = case_when(
+      network == "reevaluated" ~ "D2b",
+      measurement_id == 1 ~ "D1",
+      measurement_id == 2 ~ "D1b",
+      measurement_id == 3 ~ "D2"
+    ),
+    shortest_path = factor(shortest_path_given_opts)
+  ) %>%
+  select(
+    study, sub_id, measurement_id, shortest_path,
+    startpoint_id, endpoint_id,
+    opt1_id, opt2_id,
+    correct_choice, sub_choice,
+    correct, rt,
+    one_impossible_option,
+    opt1_distance = dist_opt1,
+    opt2_distance = dist_opt2
+  ) %>%
+  mutate(across(c(opt1_distance, opt2_distance), ~replace_na(.x, 8)))
+```
+
+```{r load-nav-trials}
+nav_trials_learned <- here("data", "clean_data", "study1_message_passing.csv") %>%
+  read_csv(show_col_types = FALSE) %>%
+  filter(
+    two_correct_options == FALSE,
+    shortest_path_given_opts == shortest_path_given_start_end
+  ) %>%
+  mutate(shortest_path = factor(shortest_path_given_opts)) %>%
+  filter(sub_id == 1) %>%
+  select(
+    shortest_path,
+    startpoint_id, endpoint_id,
+    opt1_id, opt2_id,
+    correct_choice,
+    opt1_distance = dist_opt1,
+    opt2_distance = dist_opt2
+  ) %>%
+  arrange(shortest_path, startpoint_id, endpoint_id, opt1_id, opt2_id) %>%
+  # Replace undefined distances (corresponding to impossible options)
+  # so that the softmax gets non-NA inputs; we assume that impossible
+  # options are just as bad as the longest distance found in this set
+  # of trials, i.e., a distance of 8
+  mutate(across(c(opt1_distance, opt2_distance), ~replace_na(.x, 8)))
+
+nav_trials_reeval <- here("data", "clean_data", "study2_message_passing.csv") %>%
+  read_csv(show_col_types = FALSE) %>%
+  filter(
+    two_correct_options == FALSE,
+    shortest_path_given_opts == shortest_path_given_start_end,
+    sub_id == 1,
+    network == "reevaluated",
+  ) %>%
+  mutate(shortest_path = factor(shortest_path_given_opts)) %>%
+  select(
+    shortest_path,
+    startpoint_id, endpoint_id,
+    opt1_id, opt2_id,
+    correct_choice,
+    opt1_distance = dist_opt1,
+    opt2_distance = dist_opt2
+  ) %>%
+  arrange(shortest_path, startpoint_id, endpoint_id) %>%
+  mutate(across(c(opt1_distance, opt2_distance), ~replace_na(.x, 8)))
+```
+
+```{r load-sr-stuff}
+sr_obs <- here("data", "sr_obs", "sim_obs_for_sr.csv") %>%
+  read_csv(show_col_types = FALSE)
+
+adjlist_learned <- here("data", "clean_data", "adjlist_learned.csv") %>%
+  read_csv(show_col_types = FALSE)
+
+transmat_learned <- adjlist_learned %>%
+  group_by(from) %>%
+  mutate(edge = edge / sum(edge)) %>%
+  ungroup() %>%
+  pivot_wider(names_from = to, values_from = edge) %>%
+  column_to_rownames("from") %>%
+  as.matrix()
+
+adjlist_reeval <- here("data", "clean_data", "adjlist_reevaluated.csv") %>%
+  read_csv(show_col_types = FALSE)
+
+transmat_reeval <- adjlist_reeval %>%
+  group_by(from) %>%
+  mutate(edge = edge / sum(edge)) %>%
+  ungroup() %>%
+  pivot_wider(names_from = to, values_from = edge) %>%
+  column_to_rownames("from") %>%
+  as.matrix()
+```
+
+```{r load-bfs-stuff}
+bfs_backward_sims_reeval <- here(
+  "data", "bfs_sims", "bfs_sims_reevaluated_backward.csv"
+) %>%
+  read_csv(show_col_types = FALSE) %>%
+  filter(
+    shortest_path_given_opts == shortest_path_given_start_end,
+    two_correct_options == FALSE
+  ) %>%
+  mutate(shortest_path = factor(shortest_path_given_opts)) %>%
+  select(-starts_with("shortest_path_given")) %>%
+  group_by(shortest_path, startpoint_id, endpoint_id, opt1_id, opt2_id) %>%
+  summarise(
+    p_bfs_correct = mean(bfs_choice == correct_choice),
+    p_bfs_chooses_opt1 = mean(bfs_choice == opt1_id),
+    bfs_visits = mean(bfs_n_visits_total),
+    .groups = "drop"
+  )
+
+bfs_forward_sims_reeval <- here(
+  "data", "bfs_sims", "bfs_sims_reevaluated_forward.csv"
+) %>%
+  read_csv(show_col_types = FALSE) %>%
+  filter(
+    shortest_path_given_opts == shortest_path_given_start_end,
+    two_correct_options == FALSE
+  ) %>%
+  mutate(shortest_path = factor(shortest_path_given_opts)) %>%
+  select(-starts_with("shortest_path_given")) %>%
+  group_by(shortest_path, startpoint_id, endpoint_id, opt1_id, opt2_id) %>%
+  summarise(
+    p_bfs_correct = mean(bfs_choice == correct_choice),
+    p_bfs_chooses_opt1 = mean(bfs_choice == opt1_id),
+    bfs_visits = mean(bfs_n_visits_total),
+    .groups = "drop"
+  )
+```
+
+```{r load-params}
+params <- here(
+  "data", "param_fits", "clean_params", "clean_param_fits.csv"
+) %>%
+  read_csv(show_col_types = FALSE) %>%
+  filter(measurement_id == "D2")
+```
+
+
+# Behavior after transition reevaluation
+
+```{r behav-after-tr}
+stats_nav_tr_dist2 <- bind_rows(nav_study2, nav_study3) %>%
+  filter(measurement_id %in% c("D1", "D2", "D2b")) %>%
+  mutate(
+    diff_dist = opt2_distance - opt1_distance,
+    measurement_id = fct_relevel(measurement_id, "D2b"),
+    shortest_path = fct_relevel(shortest_path, "2"),
+    # Give every subject a distinct identifier
+    sub_id = str_c(study, " s", sub_id)
+  ) %>%
+  glmmTMB(
+    correct ~ diff_dist + shortest_path * measurement_id +
+      (1 + diff_dist + shortest_path + measurement_id | sub_id) + (1 | study),
+    family = binomial,
+    data = .
+  )
+
+predict_behav_tr <- expand_grid(
+  measurement_id = c("D1", "D2", "D2b"),
+  shortest_path = factor(2:4),
+  sub_id = NA, study = NA
+) %>%
+  # Condition model predictions on the average trial difficulty from the
+  # main / pre-reevaluation set of trials
+  left_join(
+    nav_study2 %>%
+      filter(sub_id == 1, measurement_id == "D1") %>%
+      group_by(shortest_path) %>%
+      summarise(
+        diff_dist = mean(opt2_distance - opt1_distance),
+        .groups = "drop"
+      ),
+    by = join_by(shortest_path)
+  ) %>%
+  predict_glmmTMB(stats_nav_tr_dist2)
+```
+
+```{r plot-behav-after-tr}
+plot_behav_tr <- bind_rows(nav_study2, nav_study3) %>%
+  filter(measurement_id %in% c("D1", "D2", "D2b")) %>%
+  group_by(sub_id, measurement_id, shortest_path) %>%
+  summarise(accuracy = mean(correct), .groups = "drop") %>%
+  ggplot(aes(x=shortest_path, y=accuracy, color=measurement_id)) +
+  theme_custom() +
+  geom_hline(yintercept = 0.5, linetype = "dashed") +
+  geom_dotplot(
+    aes(fill = measurement_id),
+    binwidth = 0.01,
+    binaxis = "y", stackdir = "center",
+    position = position_dodge(width = 0.75),
+    dotsize = 1, alpha = 0.5, color = NA,
+    show.legend = FALSE
+  ) +
+  geom_pointrange(
+    aes(
+      x = shortest_path, y = fit,
+      ymin = fit - se.fit, ymax = fit + se.fit,
+      color = measurement_id
+    ),
+    data = predict_behav_tr, inherit.aes = FALSE, show.legend = FALSE,
+    position = position_dodge(width = 0.25), linewidth = 1
+  ) +
+  geom_line(
+    aes(
+      x = shortest_path, y = fit,
+      group = measurement_id, color = measurement_id
+    ),
+    data = predict_behav_tr, inherit.aes = FALSE,
+    position = position_dodge(width = 0.25), linewidth = 1
+  ) +
+  scale_x_discrete(name = "Shortest path distance") +
+  scale_y_continuous(
+    name = "Accuracy", labels = scales::percent, breaks = seq(0, 1, 0.25)
+  ) +
+  scale_color_manual(
+    name = NULL,
+    values = c("D1"="#fa9fb5", "D2"="#7a0177", "D2b"="#238b45"),
+    labels = c(
+      "D1"="Before rest",
+      "D2"="After overnight rest",
+      "D2b"="After reevaluation"
+    )
+  ) +
+  scale_fill_manual(
+    values = c("D1"="#fa9fb5", "D2"="#7a0177", "D2b"="#238b45")
+  ) +
+  coord_cartesian(ylim = c(0.2, 1.1)) +
+  # theme(legend.position = c(0.2, 0.2)) +
+  theme(legend.position = "bottom") +
+  ggtitle("Human behavior after reevaluation")
+
+plot_behav_tr
+```
+
+
+# Model comparison
+
+```{r calc-likelihoods}
+likelihoods_bfs_backward <- bind_rows(nav_study2, nav_study3) %>%
+  filter(measurement_id == "D2b") %>%
+  left_join(
+    params %>%
+      filter(model == "bfs_backward") %>%
+      pivot_wider(names_from = param_name, values_from = param_value) %>%
+      select(study, sub_id, search_threshold),
+    by = join_by(study, sub_id)
+  ) %>%
+  left_join(
+    bfs_backward_sims_reeval,
+    by = join_by(shortest_path, startpoint_id, endpoint_id, opt1_id, opt2_id)
+  ) %>%
+  mutate(
+    p_sub_choice_bfs = if_else(
+      sub_choice == opt1_id,
+      p_bfs_chooses_opt1,
+      1 - p_bfs_chooses_opt1
+    )
+  ) %>%
+  # What's the probability of *completing* BFS-online all the way through?
+  rowwise() %>%
+  mutate(
+    search_threshold = search_threshold,
+    p_complete_bfs = softmax(
+      option_values = c(search_threshold, bfs_visits),
+      option_chosen = 1,
+      temperature = 1
+    )
+  ) %>%
+  ungroup() %>%
+  # Weigh BFS predictions accordingly
+  mutate(
+    p_give_up = 1 - p_complete_bfs,
+    p_sub_choice = (p_complete_bfs * p_sub_choice_bfs) + (p_give_up * 1/2),
+    # To prevent log(0) = -Inf from showing up in the likelihoods, replace
+    # zeroes with the smallest non-zero value a computer can represent, aka
+    # machine-epsilon = 2.22e-16.  This is conceptually similar to estimating
+    # a small constant lapse rate, but without introducing any bias to
+    # nonzero probabilities.
+    p_sub_choice = if_else(p_sub_choice < 2.22e-16, 2.22e-16, p_sub_choice)
+  ) %>%
+  mutate(neg_ll = neg_loglik_logistic(p_sub_choice)) %>%
+  group_by(study, sub_id) %>%
+  summarise(neg_ll = sum(neg_ll), .groups = "drop")
+
+likelihoods_bfs_forward <- bind_rows(nav_study2, nav_study3) %>%
+  filter(measurement_id == "D2b") %>%
+  left_join(
+    params %>%
+      filter(model == "bfs_forward") %>%
+      pivot_wider(names_from = param_name, values_from = param_value) %>%
+      select(study, sub_id, search_threshold),
+    by = join_by(study, sub_id)
+  ) %>%
+  left_join(
+    bfs_forward_sims_reeval,
+    by = join_by(shortest_path, startpoint_id, endpoint_id, opt1_id, opt2_id)
+  ) %>%
+  mutate(
+    p_sub_choice_bfs = if_else(
+      sub_choice == opt1_id,
+      p_bfs_chooses_opt1,
+      1 - p_bfs_chooses_opt1
+    )
+  ) %>%
+  # What's the probability of *completing* BFS-online all the way through?
+  rowwise() %>%
+  mutate(
+    search_threshold = search_threshold,
+    p_complete_bfs = softmax(
+      option_values = c(search_threshold, bfs_visits),
+      option_chosen = 1,
+      temperature = 1
+    )
+  ) %>%
+  ungroup() %>%
+  # Weigh BFS predictions accordingly
+  mutate(
+    p_give_up = 1 - p_complete_bfs,
+    p_sub_choice = (p_complete_bfs * p_sub_choice_bfs) + (p_give_up * 1/2),
+    # To prevent log(0) = -Inf from showing up in the likelihoods, replace
+    # zeroes with the smallest non-zero value a computer can represent, aka
+    # machine-epsilon = 2.22e-16.  This is conceptually similar to estimating
+    # a small constant lapse rate, but without introducing any bias to
+    # nonzero probabilities.
+    p_sub_choice = if_else(p_sub_choice < 2.22e-16, 2.22e-16, p_sub_choice)
+  ) %>%
+  mutate(neg_ll = neg_loglik_logistic(p_sub_choice)) %>%
+  group_by(study, sub_id) %>%
+  summarise(neg_ll = sum(neg_ll), .groups = "drop")
+
+likelihoods_ideal_obs <- bind_rows(nav_study2, nav_study3) %>%
+  filter(measurement_id == "D2b") %>%
+  left_join(
+    params %>%
+      filter(model == "ideal_obs") %>%
+      pivot_wider(names_from = param_name, values_from = param_value) %>%
+      select(study, sub_id, softmax_temperature),
+    by = join_by(study, sub_id)
+  ) %>%
+  rowwise() %>%
+  mutate(
+    p_sub_choice = softmax(
+      option_values = c(opt1_distance, opt2_distance),
+      option_chosen = if_else(sub_choice == opt1_id, 1, 2),
+      temperature = softmax_temperature,
+      use_inverse_temperature = TRUE
+    )
+  ) %>%
+  ungroup() %>%
+  mutate(neg_ll = neg_loglik_logistic(p_sub_choice)) %>%
+  group_by(study, sub_id) %>%
+  summarise(neg_ll = sum(neg_ll), .groups = "drop")
+
+ppc_sr_rep_asymptotic <- params %>%
+  filter(model == "sr_analytic") %>%
+  pivot_wider(names_from = param_name, values_from = param_value) %>%
+  select(study, sub_id, sr_gamma) %>%
+  rowwise() %>%
+  mutate(
+    predicted_sr = map(
+      .x = sr_gamma,
+      .f = ~build_successor_analytically(
+        transmat_reeval, successor_horizon = .x, normalize = TRUE
+      )
+    )
+  ) %>%
+  ungroup() %>%
+  select(study, sub_id, predicted_sr) %>%
+  unnest(predicted_sr)
+
+likelihoods_sr_asymptotic <- bind_rows(nav_study2, nav_study3) %>%
+  filter(measurement_id == "D2b") %>%
+  left_join(
+    params %>%
+      filter(model == "sr_analytic") %>%
+      pivot_wider(names_from = param_name, values_from = param_value) %>%
+      select(study, sub_id, sr_gamma, softmax_temperature),
+    by = join_by(study, sub_id)
+  ) %>%
+  left_join(
+    ppc_sr_rep_asymptotic %>%
+      select(
+        study, sub_id, endpoint_id = to, opt1_id = from, opt1_sr = sr_value
+      ),
+    by = join_by(study, sub_id, endpoint_id, opt1_id)
+  ) %>%
+  left_join(
+    ppc_sr_rep_asymptotic %>%
+      select(
+        study, sub_id, endpoint_id = to, opt2_id = from, opt2_sr = sr_value
+      ),
+    by = join_by(study, sub_id, endpoint_id, opt2_id)
+  ) %>%
+  rowwise() %>%
+  mutate(
+    p_sub_choice = softmax(
+      option_values = c(opt1_sr, opt2_sr),
+      option_chosen = if_else(sub_choice == opt1_id, 1, 2),
+      temperature = softmax_temperature,
+      use_inverse_temperature = TRUE
+    )
+  ) %>%
+  ungroup() %>%
+  mutate(
+    # Fix a few edge cases
+    p_sub_choice = if_else((is.nan(p_sub_choice) & correct), 1, p_sub_choice),
+    neg_ll = neg_loglik_logistic(p_sub_choice)
+  ) %>%
+  group_by(study, sub_id) %>%
+  summarise(neg_ll = sum(neg_ll), .groups = "drop")
+```
+
+```{r calc-model-comp-metrics}
+oos_sr_vs_planning <- likelihoods_bfs_backward %>%
+  rename(bfs_backward = neg_ll) %>%
+  left_join(
+    likelihoods_bfs_forward %>% rename(bfs_forward = neg_ll),
+    by = join_by(study, sub_id)
+  ) %>%
+  left_join(
+    likelihoods_ideal_obs %>% rename(ideal_obs = neg_ll),
+    by = join_by(study, sub_id)
+  ) %>%
+  left_join(
+    likelihoods_sr_asymptotic %>% rename(sr = neg_ll),
+    by = join_by(study, sub_id)
+  ) %>%
+  pivot_longer(
+    c(ideal_obs, bfs_backward, bfs_forward, sr),
+    names_to = "model",
+    values_to = "neg_ll"
+  ) %>%
+  arrange(study, sub_id, neg_ll) %>%
+  group_by(study, sub_id) %>%
+  mutate(
+    # When computing Akaike weights, the relative likelihood is
+    # -1/2 * delta_aic because AIC is an unbiased estimator of likelihood
+    # times negative two (e.g., Wagenmakers & Farrell 2004).
+    # Here, we're not working w/ AIC, but the actual negative log-likelihoods
+    # themselves, so the scaling is just -1
+    relative_likelihood = exp(-1 * (neg_ll - min(neg_ll))),
+    likelihood_weight = relative_likelihood / sum(relative_likelihood)
+  ) %>%
+  ungroup()
+
+likelihood_weights <- oos_sr_vs_planning %>%
+  group_by(model) %>%
+  summarise(likelihood_weight = mean(likelihood_weight), .groups = "drop")
+
+best_fitting_model_per_sub <- oos_sr_vs_planning %>%
+  group_by(study, sub_id) %>%
+  slice_min(neg_ll) %>%
+  ungroup() %>%
+  select(study, sub_id, best_fitting_model = model) %>%
+  count(best_fitting_model) %>%
+  mutate(p = n/sum(n)) %>%
+  ungroup()
+
+pxp_pooled <- likelihoods_bfs_backward %>%
+  rename(bfs_backward = neg_ll) %>%
+  left_join(
+    likelihoods_ideal_obs %>% rename(ideal_obs = neg_ll),
+    by = join_by(study, sub_id)
+  ) %>%
+  left_join(
+    likelihoods_bfs_forward %>% rename(bfs_forward = neg_ll),
+    by = join_by(study, sub_id)
+  ) %>%
+  left_join(
+    likelihoods_sr_asymptotic %>% rename(sr = neg_ll),
+    by = join_by(study, sub_id)
+  ) %>%
+  # Convert neg-ll to loglik
+  mutate(across(c(bfs_backward, bfs_forward, ideal_obs, sr), ~-.x)) %>%
+  select(-c(study, sub_id)) %>%
+  bayesian_model_selection()
+```
+
+```{r plot-model-comparison}
+plot_model_comparison <- bind_rows(
+  # Likelihood weights
+  likelihood_weights %>%
+    group_by(model) %>%
+    summarise(likelihood_weight = mean(likelihood_weight), .groups = "drop") %>%
+    mutate(
+      text = str_c(round(likelihood_weight, 2) * 100, "%"),
+      metric = "Likelihood\nweights"
+    ) %>%
+    rename(y = likelihood_weight),
+  # Proportion of subjects best-fit by each model
+  best_fitting_model_per_sub %>%
+    mutate(
+      text = str_c(round(p, 2) * 100, "%"),
+      metric = "Prop.\nsubj."
+    ) %>%
+    rename(model = best_fitting_model, y = p) %>%
+    select(-n),
+  # Protected exceedance probabilities
+  pxp_pooled %>%
+    select(model, pxp) %>%
+    mutate(
+      text = round(pxp, 2) * 100,
+      text = if_else(model != "sr", "", str_c(text, "%"))
+    ) %>%
+    mutate(metric = "PXP") %>%
+    rename(y = pxp)
+) %>%
+  ggplot(aes(x=metric, y=y, fill=model)) +
+  theme_custom() +
+  geom_col() +
+  geom_text(aes(label = text), position = position_stack(vjust = 0.5)) +
+  scale_x_discrete(name = NULL) +
+  scale_y_continuous(
+    name = NULL,
+    expand = expansion(mult = c(0.01, 0.01))
+  ) +
+  scale_fill_manual(
+    name = NULL,
+    labels = c(
+      "bfs_backward" = "BFS-B",
+      "bfs_forward" = "BFS-F",
+      "ideal_obs" = "Ideal obs.",
+      "sr" = "SR"
+    ),
+    values = c(
+      "bfs_backward" = "#a6dba0",
+      "bfs_forward" = "#5aae61",
+      "ideal_obs" = "#1b7837",
+      "sr" = "#af8dc3"
+    )
+  ) +
+  theme(
+    legend.position = "bottom",
+    axis.text.y = element_blank(),
+    axis.ticks.y = element_blank()
+  ) +
+  ggtitle("Out-of-sample model comparison")
+
+plot_model_comparison
+```
+
+
+# SR-replay
+
+```{r sim-rep-before-tr}
+# Note: this is still a matrix of counts, NOT probabilities!
+# Convert to a probability matrix before simulating navigation
+sim_rep_delta_rule_before_tr <- map_dfr(
+  .x = seq(0.1, 0.9, 0.1),
+  .f = ~build_successor_td_0(
+    successor_matrix = diag(nrow = 13, ncol = 13),
+    observation_matrix = sr_obs %>%
+        filter(iter <= 100) %>%
+        select(from, to) %>%
+      as.matrix(),
+    sr_alpha = 0.1,
+    sr_gamma = .x,
+    bidirectional = TRUE
+  )
+)
+```
+
+```{r sr-obs-reeval}
+set.seed(sum(utf8ToInt("we came to see time is taller than space is wide")))
+
+sr_obs_reeval <- expand_grid(
+  iter = 1:100,
+  adjlist_reeval %>%
+    filter(edge == 1) %>%
+    select(from, to)
+) %>%
+  group_by(iter) %>%
+  slice_sample(prop = 1) %>%
+  ungroup()
+```
+
+```{r sim-after-tr-replay}
+sim_rep_delta_rule_after_tr_replay <- expand_grid(
+  n_iter = c(1, 5, 10, 100),
+  sim_rep_delta_rule_before_tr %>% select(-sr_alpha)
+) %>%
+  group_by(n_iter, sr_gamma) %>%
+  nest() %>%
+  mutate(
+    updated_sr = map(
+      .x = data,
+      .f = ~build_successor_td_0(
+        # Prior: delta-rule SR learned before transition reevaluation
+        successor_matrix = .x %>%
+          select(from, to, sr_value) %>%
+          pivot_wider(names_from = to, values_from = sr_value) %>%
+          column_to_rownames("from") %>%
+          as.matrix(),
+        # Observations: transition reevaluation / replay
+          observation_matrix = sr_obs_reeval %>%
+            filter(iter <= n_iter) %>%
+            select(from, to) %>%
+            as.matrix(),
+        # Remaining args for delta-rule SR
+        sr_alpha = 0.1,
+        sr_gamma = sr_gamma,
+        bidirectional = TRUE
+      ) %>%
+        # Convert from counts to probabilities
+        mutate(sr_value = sr_value * (1-sr_gamma)) %>%
+        select(-c(sr_gamma, sr_alpha))
+    )
+  ) %>%
+  ungroup() %>%
+  select(-data) %>%
+  unnest(updated_sr)
+
+sim_nav_delta_rule_after_tr_replay <- expand_grid(
+  n_iter = c(1, 5, 10, 100),
+  sr_gamma = seq(0.1, 0.9, 0.1),
+  nav_trials_reeval
+) %>%
+  left_join(
+    sim_rep_delta_rule_after_tr_replay %>%
+      rename(endpoint_id = to, opt1_id = from, opt1_sr = sr_value),
+    by = join_by(n_iter, sr_gamma, endpoint_id, opt1_id)
+  ) %>%
+  left_join(
+    sim_rep_delta_rule_after_tr_replay %>%
+      rename(endpoint_id = to, opt2_id = from, opt2_sr = sr_value),
+    by = join_by(n_iter, sr_gamma, endpoint_id, opt2_id)
+  ) %>%
+  rowwise() %>%
+  mutate(
+    p_correct = softmax(
+      option_values = c(opt1_sr, opt2_sr),
+      option_chosen = if_else(opt1_id == correct_choice, 1, 2),
+      temperature = 100,
+      use_inverse_temperature = TRUE
+    )
+  ) %>%
+  ungroup()
+```
+
+```{r sim-after-tr-no-replay}
+sim_nav_delta_rule_after_tr_no_replay <- expand_grid(
+  n_iter = 0,
+  sr_gamma = seq(0.1, 0.9, 0.1),
+  nav_trials_reeval
+) %>%
+  left_join(
+    sim_rep_delta_rule_before_tr %>%
+      select(sr_gamma, endpoint_id = to, opt1_id = from, opt1_sr = sr_value),
+    by = join_by(sr_gamma, endpoint_id, opt1_id)
+  ) %>%
+  left_join(
+    sim_rep_delta_rule_before_tr %>%
+      select(sr_gamma, endpoint_id = to, opt2_id = from, opt2_sr = sr_value),
+    by = join_by(sr_gamma, endpoint_id, opt2_id)
+  ) %>%
+  rowwise() %>%
+  mutate(
+    p_correct = softmax(
+      option_values = c(opt1_sr, opt2_sr),
+      option_chosen = if_else(opt1_id == correct_choice, 1, 2),
+      temperature = 100,
+      use_inverse_temperature = TRUE
+    )
+  ) %>%
+  ungroup()
+```
+
+```{r plot-sim-sr-replay}
+plot_sr <- bind_rows(
+  sim_nav_delta_rule_after_tr_replay,
+  sim_nav_delta_rule_after_tr_no_replay
+) %>%
+  group_by(n_iter, sr_gamma, shortest_path) %>%
+  summarise(accuracy = mean(p_correct), .groups = "drop") %>%
+  mutate(
+    n_iter = if_else(
+      n_iter == 0,
+      "No replay",
+      str_c(
+        str_pad(n_iter, width = 3, side = "left"),
+        " replay iter."
+      )
+    ),
+    n_iter = fct_relevel(n_iter, "No replay")
+  ) %>%
+  ggplot(aes(x=shortest_path, y=accuracy, color=sr_gamma)) +
+  theme_custom() +
+  geom_hline(yintercept = 0.5, linetype = "dashed") +
+  facet_wrap(~n_iter, nrow = 1) +
+  geom_line(aes(group = sr_gamma), linewidth = 0.8) +
+  scale_color_viridis_c(
+    name = str_c(unicode_greek["gamma"], " ="),
+    option = "turbo", end = 0.9, direction = -1
+  ) +
+  scale_x_discrete(name = "Shortest path distance") +
+  scale_y_continuous(
+    name = "Accuracy", labels = scales::percent, breaks = seq(0, 1, .25)
+  ) +
+  coord_cartesian(ylim = c(0.2, 1)) +
+  theme(legend.position = "bottom") +
+  ggtitle("Simulated SR-replay")
+
+plot_sr
+```
+
+
+# Save figure
+
+```{r save-figure}
+plot_figure_4 <- {
+  (plot_behav_tr | plot_model_comparison) +
+    # plot_layout(design = "AAB", guides = "collect")
+    plot_layout(guides = "collect")
+} / plot_sr +
+  plot_annotation(
+    title = "Social navigation after transition reevaluation",
+    tag_levels = "A", tag_suffix = ".",
+    theme = theme(plot.title = element_text(hjust = 0.5))
+  ) &
+  theme(legend.position = "bottom")
+
+plot_figure_4
+
+if (knitting) {
+  suppressWarnings(
+    ggsave(
+      filename = here("figures", "fig4.pdf"),
+      plot = plot_figure_4,
+      scale = 2,
+      width = 100, height = 100, units = "mm", dpi = 300
+    )
+  )
+  
+  ggsave(
+    filename = here("figures", "fig4_cairo.pdf"),
+    plot = plot_figure_4,
+    scale = 2,
+    width = 100, height = 100, units = "mm", dpi = 300,
+    device = cairo_pdf
+  )
+}
+```
+
