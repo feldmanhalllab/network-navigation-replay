@@ -64,6 +64,28 @@ if (knitting) {
 ```
 
 ```{r load-data}
+mem_study1 <- here("data", "clean_data", "study1_memory.csv") %>%
+  read_csv(show_col_types = FALSE) %>%
+  mutate(study = "Study 1", measurement_id = str_c("D", measurement_id)) %>%
+  filter(from != to)
+
+mem_study2 <- here("data", "clean_data", "study2_memory.csv") %>%
+  read_csv(show_col_types = FALSE) %>%
+  mutate(study = "Study 2", measurement_id = str_c("D", measurement_id)) %>%
+  filter(from != to)
+
+mem_study3 <- here("data", "clean_data", "study3_memory.csv") %>%
+  read_csv(show_col_types = FALSE) %>%
+  mutate(
+    study = "Study 3",
+    measurement_id = case_when(
+      measurement_id == 1 ~ "D1",
+      measurement_id == 2 ~ "D1b",
+      measurement_id == 3 ~ "D2"
+    )
+  ) %>%
+  filter(from != to)
+
 params <- here("data", "param_fits", "clean_params", "clean_param_fits.csv") %>%
   read_csv(show_col_types = FALSE)
 
@@ -136,7 +158,91 @@ nav_study3 <- here("data", "clean_data", "study3_message_passing.csv") %>%
 ```
 
 
-# Before rest: Can humans solve social navigation problems?
+# Memory accuracy
+
+We'll start with descriptive statistics of memory accuracy.
+
+```{r descriptive-memory-day1}
+bind_rows(mem_study1, mem_study2, mem_study3) %>%
+  group_by(study, measurement_id) %>%
+  summarise(accuracy = mean(correct), .groups = "drop") %>%
+  kable_custom("Descriptive: Memory accuracy", digits = 2)
+```
+
+## Study 1
+
+We'll start with study 1. Since this is a one-day study, we're only interested in testing memory accuracy against chance (50%).
+
+```{r memory-study1}
+mem_study1 %>%
+  glmmTMB(
+    correct ~ 1 + (1 | sub_id),
+    family = binomial,
+    data = .
+  ) %>%
+  tidy(conf.int = TRUE) %>%
+  check_significance() %>%
+  select(-c(effect, component)) %>%
+  kable_custom("Memory: Study 1", digits = 3)
+```
+
+## Study 2
+
+Study 2 was a two-day study, so we'll test how accuracy changes after overnight rest.
+
+```{r memory-study2}
+mem_study2 %>%
+  glmmTMB(
+    correct ~ measurement_id + (1 | sub_id),
+    family = binomial,
+    data = .
+  ) %>%
+  tidy(conf.int = TRUE) %>%
+  check_significance() %>%
+  select(-c(effect, component)) %>%
+  kable_custom("Memory: Study 2", digits = 3)
+```
+
+## Study 3
+
+For the primary analysis of interest, we can analyze study 3 just like we analyzed study 2.
+
+```{r memory-study3-overnight}
+mem_study3 %>%
+  filter(measurement_id %in% c("D1", "D2")) %>%
+  glmmTMB(
+    correct ~ measurement_id + (1 | sub_id),
+    family = binomial,
+    data = .
+  ) %>%
+  tidy(conf.int = TRUE) %>%
+  check_significance() %>%
+  select(-c(effect, component)) %>%
+  kable_custom(c("Memory: Study 3", "Overnight rest"), digits = 3)
+```
+
+Study 3 also included an awake rest condition at the end of Day 1. We'll make "after awake rest" the reference category and compare it against the other measurements (before/after overnight rest).
+
+```{r memory-study3-awake}
+mem_study3 %>%
+  mutate(measurement_id = fct_relevel(measurement_id, "D1b")) %>%
+  glmmTMB(
+    correct ~ measurement_id + (1 | sub_id),
+    family = binomial,
+    data = .
+  ) %>%
+  tidy(conf.int = TRUE) %>%
+  check_significance() %>%
+  select(-c(effect, component)) %>%
+  kable_custom(c("Memory: Study 3", "Awake rest"), digits = 3)
+```
+
+
+# Social navigation
+
+Note that in this section, we're looking at results from aggregated/pooled data. Disaggregated results from each study are reported later in this notebook.
+
+## Before rest
 
 In the paper, we start by examining social navigation behaviors in a one-day session (Study 1), or in the first session of a two-day study (Studies 2-3). Across all three studies, the procedure is exactly identical; studies 2-3 are, in this part of the dataset, exact replications of study 1.
 
@@ -916,6 +1022,243 @@ bind_rows(
   kable_custom(
     c("Learning task: Evidence of social priors", "(Only last block)"),
     digits = 3
+  )
+```
+
+
+# Social navigation, disaggregated
+
+## Navigation before overnight rest
+
+We want to know whether navigation accuracy is different from chance at each distance, so we'll iteratively reparameterize the model so that each distance is the reference category.
+
+We'll start with study 1. Note that estimating a random slope leads to model convergence problems in studies 2-3, so we'll only be estimating a random intercept per subject.
+
+```{r nav-day1-study1}
+stats_nav_study1_dist2 <- nav_study1 %>%
+  mutate(shortest_path = fct_relevel(shortest_path, "2")) %>%
+  glmmTMB(
+    correct ~ shortest_path + (1 | sub_id),
+    family = binomial,
+    data = .
+  )
+
+stats_nav_study1_dist3 <- nav_study1 %>%
+  mutate(shortest_path = fct_relevel(shortest_path, "3")) %>%
+  glmmTMB(
+    correct ~ shortest_path + (1 | sub_id),
+    family = binomial,
+    data = .
+  )
+
+stats_nav_study1_dist4 <- nav_study1 %>%
+  mutate(shortest_path = fct_relevel(shortest_path, "4")) %>%
+  glmmTMB(
+    correct ~ shortest_path + (1  | sub_id),
+    family = binomial,
+    data = .
+  )
+
+map_dfr(
+  .x = list(
+    "dist-2" = stats_nav_study1_dist2,
+    "dist-3" = stats_nav_study1_dist3,
+    "dist-4" = stats_nav_study1_dist4
+  ),
+  .f = ~tidy(.x, conf.int = TRUE),
+  .id = "ref_cat"
+) %>%
+  check_significance() %>%
+  select(-c(effect, component)) %>%
+  kable_custom(
+    "Navigation accuracy: Day 1, Study 1", grouping_var = ref_cat, digits = 3
+  )
+```
+
+Moving on to study 2:
+
+```{r nav-day1-study2}
+stats_nav_study2_day1_dist2 <- nav_study2 %>%
+  filter(measurement_id == "D1") %>%
+  mutate(shortest_path = fct_relevel(shortest_path, "2")) %>%
+  glmmTMB(
+    correct ~ shortest_path + (1 | sub_id),
+    family = binomial,
+    data = .
+  )
+
+stats_nav_study2_day1_dist3 <- nav_study2 %>%
+  filter(measurement_id == "D1") %>%
+  mutate(shortest_path = fct_relevel(shortest_path, "3")) %>%
+  glmmTMB(
+    correct ~ shortest_path + (1 | sub_id),
+    family = binomial,
+    data = .
+  )
+
+stats_nav_study2_day1_dist4 <- nav_study2 %>%
+  filter(measurement_id == "D1") %>%
+  mutate(shortest_path = fct_relevel(shortest_path, "4")) %>%
+  glmmTMB(
+    correct ~ shortest_path + (1 | sub_id),
+    family = binomial,
+    data = .
+  )
+
+map_dfr(
+  .x = list(
+    "dist-2" = stats_nav_study2_day1_dist2,
+    "dist-3" = stats_nav_study2_day1_dist3,
+    "dist-4" = stats_nav_study2_day1_dist4
+  ),
+  .f = ~tidy(.x, conf.int = TRUE),
+  .id = "ref_cat"
+) %>%
+  check_significance() %>%
+  select(-c(effect, component)) %>%
+  kable_custom(
+    "Navigation accuracy: Day 1, Study 2", grouping_var = ref_cat, digits = 3
+  )
+```
+
+And finally study 3:
+
+```{r nav-day1-study3}
+stats_nav_study3_day1_dist2 <- nav_study3 %>%
+  filter(measurement_id == "D1") %>%
+  mutate(shortest_path = fct_relevel(shortest_path, "2")) %>%
+  glmmTMB(
+    correct ~ shortest_path + (1 | sub_id),
+    family = binomial,
+    data = .
+  )
+
+stats_nav_study3_day1_dist3 <- nav_study3 %>%
+  filter(measurement_id == "D1") %>%
+  mutate(shortest_path = fct_relevel(shortest_path, "3")) %>%
+  glmmTMB(
+    correct ~ shortest_path + (1 | sub_id),
+    family = binomial,
+    data = .
+  )
+
+stats_nav_study3_day1_dist4 <- nav_study3 %>%
+  filter(measurement_id == "D1") %>%
+  mutate(shortest_path = fct_relevel(shortest_path, "4")) %>%
+  glmmTMB(
+    correct ~ shortest_path + (1 | sub_id),
+    family = binomial,
+    data = .
+  )
+
+map_dfr(
+  .x = list(
+    "dist-2" = stats_nav_study3_day1_dist2,
+    "dist-3" = stats_nav_study3_day1_dist3,
+    "dist-4" = stats_nav_study3_day1_dist4
+  ),
+  .f = ~tidy(.x, conf.int = TRUE),
+  .id = "ref_cat"
+) %>%
+  check_significance() %>%
+  select(-c(effect, component)) %>%
+  kable_custom(
+    "Navigation accuracy: Day 1, Study 3", grouping_var = ref_cat, digits = 3
+  )
+```
+
+
+## Navigation after overnight rest
+
+In studies 2-3, subjects returned to the lab after overnight rest. The primary analysis of interest is to test whether there is evidence of navigation accuracy increasing. Because we're interested in addressing this question for each distance, we'll be iteratively reparameterizing the models so that each distance is the reference category.
+
+```{r nav-day2-study2}
+stats_nav_study2_day2_dist2 <- nav_study2 %>%
+  filter(measurement_id %in% c("D1", "D2")) %>%
+  mutate(shortest_path = fct_relevel(shortest_path, "2")) %>%
+  glmmTMB(
+    correct ~ measurement_id * shortest_path + (1 + measurement_id | sub_id),
+    family = binomial,
+    data = .
+  )
+
+stats_nav_study2_day2_dist3 <- nav_study2 %>%
+  filter(measurement_id %in% c("D1", "D2")) %>%
+  mutate(shortest_path = fct_relevel(shortest_path, "3")) %>%
+  glmmTMB(
+    correct ~ measurement_id * shortest_path + (1 + measurement_id | sub_id),
+    family = binomial,
+    data = .
+  )
+
+stats_nav_study2_day2_dist4 <- nav_study2 %>%
+  filter(measurement_id %in% c("D1", "D2")) %>%
+  mutate(shortest_path = fct_relevel(shortest_path, "4")) %>%
+  glmmTMB(
+    correct ~ measurement_id * shortest_path + (1 + measurement_id | sub_id),
+    family = binomial,
+    data = .
+  )
+
+map_dfr(
+  .x = list(
+    "dist-2" = stats_nav_study2_day2_dist2,
+    "dist-3" = stats_nav_study2_day2_dist3,
+    "dist-4" = stats_nav_study2_day2_dist4
+  ),
+  .f = ~tidy(.x, conf.int = TRUE),
+  .id = "ref_cat"
+) %>%
+  check_significance() %>%
+  select(-c(effect, component)) %>%
+  kable_custom(
+    "Navigation accuracy: Day 2, Study 2", grouping_var = ref_cat, digits = 3
+  )
+```
+
+We'll do the same for study 3.
+
+```{r nav-day2-study3}
+stats_nav_study3_day2_dist2 <- nav_study3 %>%
+  filter(measurement_id %in% c("D1", "D2")) %>%
+  mutate(shortest_path = fct_relevel(shortest_path, "2")) %>%
+  glmmTMB(
+    correct ~ measurement_id * shortest_path + (1 + measurement_id | sub_id),
+    family = binomial,
+    data = .
+  )
+
+stats_nav_study3_day2_dist3 <- nav_study3 %>%
+  filter(measurement_id %in% c("D1", "D2")) %>%
+  mutate(shortest_path = fct_relevel(shortest_path, "3")) %>%
+  glmmTMB(
+    correct ~ measurement_id * shortest_path + (1 + measurement_id | sub_id),
+    family = binomial,
+    data = .
+  )
+
+stats_nav_study3_day2_dist4 <- nav_study3 %>%
+  filter(measurement_id %in% c("D1", "D2")) %>%
+  mutate(shortest_path = fct_relevel(shortest_path, "4")) %>%
+  glmmTMB(
+    correct ~ measurement_id * shortest_path + (1 + measurement_id | sub_id),
+    family = binomial,
+    data = .
+  )
+
+map_dfr(
+  .x = list(
+    "dist-2" = stats_nav_study3_day2_dist2,
+    "dist-3" = stats_nav_study3_day2_dist3,
+    "dist-4" = stats_nav_study3_day2_dist4
+  ),
+  .f = ~tidy(.x, conf.int = TRUE),
+  .id = "ref_cat"
+) %>%
+  check_significance() %>%
+  select(-c(effect, component)) %>%
+  kable_custom(
+    "Navigation accuracy: Day 2, Study 3", grouping_var = ref_cat, digits = 3
   )
 ```
 

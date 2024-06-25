@@ -1735,3 +1735,114 @@ if (knitting) {
 }
 ```
 
+
+# Social navigation, disaggregated
+
+We'll start by looking at study 2. Note that in other disaggregated analyses, we don't estimate a random slope for shortest path distance due to convergence issues. To maintain consistency, we'll omit that random slope in these analyses also.
+
+```{r nav-tr-study2}
+stats_nav_study2_tr_dist2 <- nav_study2 %>%
+  mutate(
+    shortest_path = fct_relevel(shortest_path, "2"),
+    measurement_id = fct_relevel(measurement_id, "D2b")
+  ) %>%
+  glmmTMB(
+    correct ~ measurement_id * shortest_path + (1 + measurement_id | sub_id),
+    family = binomial,
+    data = .
+  )
+
+stats_nav_study2_tr_dist3 <- nav_study2 %>%
+  mutate(
+    shortest_path = fct_relevel(shortest_path, "3"),
+    measurement_id = fct_relevel(measurement_id, "D2b")
+  ) %>%
+  glmmTMB(
+    correct ~ measurement_id * shortest_path + (1 + measurement_id | sub_id),
+    family = binomial,
+    data = .
+  )
+
+stats_nav_study2_tr_dist4 <- nav_study2 %>%
+  mutate(
+    shortest_path = fct_relevel(shortest_path, "4"),
+    measurement_id = fct_relevel(measurement_id, "D2b")
+  ) %>%
+  glmmTMB(
+    correct ~ measurement_id * shortest_path + (1 + measurement_id | sub_id),
+    family = binomial,
+    data = .
+  )
+
+map_dfr(
+  .x = list(
+    "dist-2" = stats_nav_study2_tr_dist2,
+    "dist-3" = stats_nav_study2_tr_dist3,
+    "dist-4" = stats_nav_study2_tr_dist4
+  ),
+  .f = ~tidy(.x, conf.int = TRUE),
+  .id = "ref_cat"
+) %>%
+  check_significance() %>%
+  select(-c(effect, component)) %>%
+  kable_custom(
+    "Navigation accuracy: Day 2b, Study 2", grouping_var = ref_cat, digits = 3
+  )
+```
+
+And we'll do the same for study 3...
+
+```{r nav-tr-study3}
+stats_nav_study3_tr_dist2 <- nav_study3 %>%
+  filter(measurement_id %in% c("D1", "D2", "D2b")) %>%
+  mutate(
+    shortest_path = fct_relevel(shortest_path, "2"),
+    measurement_id = fct_relevel(measurement_id, "D2b")
+  ) %>%
+  glmmTMB(
+    correct ~ measurement_id * shortest_path + (1 + measurement_id | sub_id),
+    family = binomial,
+    data = .
+  )
+
+stats_nav_study3_tr_dist3 <- nav_study3 %>%
+  filter(measurement_id %in% c("D1", "D2", "D2b")) %>%
+  mutate(
+    shortest_path = fct_relevel(shortest_path, "3"),
+    measurement_id = fct_relevel(measurement_id, "D2b")
+  ) %>%
+  glmmTMB(
+    correct ~ measurement_id * shortest_path + (1 + measurement_id | sub_id),
+    family = binomial,
+    data = .
+  )
+
+stats_nav_study3_tr_dist4 <- nav_study3 %>%
+  filter(measurement_id %in% c("D1", "D2", "D2b")) %>%
+  mutate(
+    shortest_path = fct_relevel(shortest_path, "4"),
+    measurement_id = fct_relevel(measurement_id, "D2b")
+  ) %>%
+  glmmTMB(
+    correct ~ measurement_id * shortest_path + (1 + measurement_id | sub_id),
+    family = binomial,
+    data = .
+  )
+
+map_dfr(
+  .x = list(
+    "dist-2" = stats_nav_study3_tr_dist2,
+    "dist-3" = stats_nav_study3_tr_dist3,
+    "dist-4" = stats_nav_study3_tr_dist4
+  ),
+  .f = ~tidy(.x, conf.int = TRUE),
+  .id = "ref_cat"
+) %>%
+  check_significance() %>%
+  select(-c(effect, component)) %>%
+  kable_custom(
+    "Navigation accuracy: Day 2b, Study 3", grouping_var = ref_cat, digits = 3
+  )
+```
+
+
