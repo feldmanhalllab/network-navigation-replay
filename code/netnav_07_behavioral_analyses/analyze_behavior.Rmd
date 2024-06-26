@@ -167,7 +167,47 @@ bind_rows(mem_study1, mem_study2, mem_study3) %>%
   group_by(study, measurement_id) %>%
   summarise(accuracy = mean(correct), .groups = "drop") %>%
   kable_custom("Descriptive: Memory accuracy", digits = 2)
+
+bind_rows(mem_study1, mem_study2, mem_study3) %>%
+  group_by(measurement_id) %>%
+  summarise(accuracy = mean(correct), .groups = "drop") %>%
+  kable_custom("Descriptive: Memory accuracy (pooled)", digits = 2)
 ```
+
+## Before rest (pooled)
+
+```{r stats-mem-before-rest}
+bind_rows(mem_study1, mem_study2, mem_study3) %>%
+  filter(measurement_id %in% c("D1")) %>%
+  mutate(sub_id = str_c(study, " s", sub_id)) %>%
+  glmmTMB(
+    correct ~ 1 + (1 | sub_id),
+    family = binomial,
+    data = .
+  ) %>%
+  tidy(conf.int = TRUE) %>%
+  check_significance() %>%
+  select(-c(effect, component)) %>%
+  kable_custom("Memory: Before rest", digits = 3)
+```
+
+## After overnight rest (pooled)
+
+```{r stats-mem-after-rest}
+bind_rows(mem_study2, mem_study3) %>%
+  filter(measurement_id %in% c("D1", "D2")) %>%
+  mutate(sub_id = str_c(study, " s", sub_id)) %>%
+  glmmTMB(
+    correct ~ measurement_id + (1 + measurement_id | sub_id),
+    family = binomial,
+    data = .
+  ) %>%
+  tidy(conf.int = TRUE) %>%
+  check_significance() %>%
+  select(-c(effect, component)) %>%
+  kable_custom("Memory: After overnight rest", digits = 3)
+```
+
 
 ## Study 1
 

@@ -1743,33 +1743,39 @@ We'll start by looking at study 2. Note that in other disaggregated analyses, we
 ```{r nav-tr-study2}
 stats_nav_study2_tr_dist2 <- nav_study2 %>%
   mutate(
+    diff_dist = opt2_distance - opt1_distance,
     shortest_path = fct_relevel(shortest_path, "2"),
     measurement_id = fct_relevel(measurement_id, "D2b")
   ) %>%
   glmmTMB(
-    correct ~ measurement_id * shortest_path + (1 + measurement_id | sub_id),
+    correct ~ diff_dist + measurement_id * shortest_path +
+      (1 + measurement_id | sub_id),
     family = binomial,
     data = .
   )
 
 stats_nav_study2_tr_dist3 <- nav_study2 %>%
   mutate(
+    diff_dist = opt2_distance - opt1_distance,
     shortest_path = fct_relevel(shortest_path, "3"),
     measurement_id = fct_relevel(measurement_id, "D2b")
   ) %>%
   glmmTMB(
-    correct ~ measurement_id * shortest_path + (1 + measurement_id | sub_id),
+    correct ~ diff_dist + measurement_id * shortest_path +
+      (1 + measurement_id | sub_id),
     family = binomial,
     data = .
   )
 
 stats_nav_study2_tr_dist4 <- nav_study2 %>%
   mutate(
+    diff_dist = opt2_distance - opt1_distance,
     shortest_path = fct_relevel(shortest_path, "4"),
     measurement_id = fct_relevel(measurement_id, "D2b")
   ) %>%
   glmmTMB(
-    correct ~ measurement_id * shortest_path + (1 + measurement_id | sub_id),
+    correct ~ diff_dist + measurement_id * shortest_path +
+      (1 + measurement_id | sub_id),
     family = binomial,
     data = .
   )
@@ -1796,11 +1802,13 @@ And we'll do the same for study 3...
 stats_nav_study3_tr_dist2 <- nav_study3 %>%
   filter(measurement_id %in% c("D1", "D2", "D2b")) %>%
   mutate(
+    diff_dist = opt2_distance - opt1_distance,
     shortest_path = fct_relevel(shortest_path, "2"),
     measurement_id = fct_relevel(measurement_id, "D2b")
   ) %>%
   glmmTMB(
-    correct ~ measurement_id * shortest_path + (1 + measurement_id | sub_id),
+    correct ~ diff_dist + measurement_id * shortest_path +
+      (1 + measurement_id | sub_id),
     family = binomial,
     data = .
   )
@@ -1808,11 +1816,13 @@ stats_nav_study3_tr_dist2 <- nav_study3 %>%
 stats_nav_study3_tr_dist3 <- nav_study3 %>%
   filter(measurement_id %in% c("D1", "D2", "D2b")) %>%
   mutate(
+    diff_dist = opt2_distance - opt1_distance,
     shortest_path = fct_relevel(shortest_path, "3"),
     measurement_id = fct_relevel(measurement_id, "D2b")
   ) %>%
   glmmTMB(
-    correct ~ measurement_id * shortest_path + (1 + measurement_id | sub_id),
+    correct ~ diff_dist + measurement_id * shortest_path +
+      (1 + measurement_id | sub_id),
     family = binomial,
     data = .
   )
@@ -1820,11 +1830,13 @@ stats_nav_study3_tr_dist3 <- nav_study3 %>%
 stats_nav_study3_tr_dist4 <- nav_study3 %>%
   filter(measurement_id %in% c("D1", "D2", "D2b")) %>%
   mutate(
+    diff_dist = opt2_distance - opt1_distance,
     shortest_path = fct_relevel(shortest_path, "4"),
     measurement_id = fct_relevel(measurement_id, "D2b")
   ) %>%
   glmmTMB(
-    correct ~ measurement_id * shortest_path + (1 + measurement_id | sub_id),
+    correct ~ diff_dist + measurement_id * shortest_path +
+      (1 + measurement_id | sub_id),
     family = binomial,
     data = .
   )
