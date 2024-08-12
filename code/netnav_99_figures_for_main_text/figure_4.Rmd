@@ -276,6 +276,8 @@ predict_behav_tr <- expand_grid(
 ```{r plot-behav-after-tr}
 plot_behav_tr <- bind_rows(nav_study2, nav_study3) %>%
   filter(measurement_id %in% c("D1", "D2", "D2b")) %>%
+  # Give every subject a distinct identifier
+  mutate(sub_id = str_c(study, " s", sub_id)) %>%
   group_by(sub_id, measurement_id, shortest_path) %>%
   summarise(accuracy = mean(correct), .groups = "drop") %>%
   ggplot(aes(x=shortest_path, y=accuracy, color=measurement_id)) +
