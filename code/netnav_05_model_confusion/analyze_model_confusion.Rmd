@@ -1,0 +1,297 @@
+---
+title: "Model confusion"
+output:
+  html_document:
+    code_download: true
+    code_folding: hide
+    toc: true
+    toc_float:
+      collapsed: true
+---
+
+# Setup
+
+```{r libraries}
+workflow_name <- "netnav_05_model_confusion"
+
+library(tidyverse)
+library(here)
+library(broom)
+library(patchwork)
+
+source(here("code", "utils", "ggplot_themes.R"))
+source(here("code", "utils", "kable_utils.R"))
+source(here("code", "utils", "bayesian_model_selection.R"))
+
+knitting <- knitr::is_html_output()
+
+create_path <- function(this_path) {
+  if (!dir.exists(this_path)) {
+    dir.create(this_path, recursive = TRUE)
+  }
+}
+
+if (knitting) {
+  here("outputs", workflow_name) %>%
+    create_path()
+  
+  here("figures") %>%
+    create_path()
+}
+```
+
+```{r load-params}
+params <- here("data", "model_confusion") %>%
+  fs::dir_ls(
+    regexp = "(bfs_(backward|forward)|ideal_obs|sr)(.)+\\.csv",
+    recurse = 1
+  ) %>%
+  map_dfr(.f = ~read_csv(.x, show_col_types = FALSE), .id = "filename") %>%
+  mutate(
+    sub_id = str_extract(filename, "sub_[[:digit:]]+"),
+    sub_id = str_remove(sub_id, "sub_"),
+    sub_id = as.numeric(sub_id),
+    fit_model = str_extract(
+      filename, "fit_model_(bfs_(backward|forward)|ideal_obs|sr)"
+    ),
+    fit_model = str_remove(fit_model, "fit_model_"),
+    true_model = str_extract(
+      filename, "true_model_(bfs_(backward|forward)|ideal_obs|sr)"
+    ),
+    true_model = str_remove(true_model, "true_model_")
+  ) %>%
+  select(sub_id, everything(), -filename) %>%
+  rename(neg_loglik = optim_value) %>%
+  # Find best-fitting optimization run
+  filter(convergence == "converged") %>%
+  group_by(sub_id, fit_model, true_model) %>%
+  slice_min(neg_loglik, n = 1) %>%
+  ungroup() %>%
+  # Some subjects may have had multiple "best" optimization runs
+  # In that case, just go with whichever "best" run was estimated first
+  group_by(sub_id, fit_model, true_model) %>%
+  slice_min(optimizer_run, n = 1) %>%
+  ungroup()
+```
+
+
+# Compute AICc
+
+We'll use AICc (AIC corrected for small n) to determine which model "best" fits each agent's behavior.
+
+```{r compute-aicc}
+aicc <- params %>%
+  select(sub_id, true_model, fit_model, neg_loglik) %>%
+  distinct() %>%
+  arrange(sub_id, true_model, fit_model) %>%
+  mutate(
+    n_params = if_else(fit_model == "sr", 2, 1),
+    n_datapoints = 115,
+    aic = (-2 * -neg_loglik) + (2 * n_params),
+    aicc = aic + (
+      (2 * n_params * (n_params + 1)) / (n_datapoints - n_params - 1)
+    )
+  )
+
+best_fitting_model_per_agent <- aicc %>%
+  group_by(sub_id, true_model) %>%
+  slice_min(aicc, n = 1) %>%
+  ungroup() %>%
+  select(sub_id, true_model, best_fitting_model = fit_model)
+```
+
+
+# Confusion matrix
+
+The confusion matrix specifies $p(\text{fit model} = Y \vert \text{true model} = X)$. Ideally, we would want large probabilities on the diagonal, and small probabilities otherwise. This analysis indicates that confusability is relatively high for the SR model, but relatively low for other models.
+
+Specifically, this analysis indicates that when the SR is actually the true model, there is a nontrivial chance that the parameter-fitting process would lead us to mistakenly infer that the the data are better-explained by the BFS-forward (19%), BFS-backward (15%), or ideal observer (10%) models.
+
+```{r plot-confusion-matrix}
+plot_confusion_matrix <- aicc %>%
+  group_by(sub_id, true_model) %>%
+  mutate(best_model = aicc == min(aicc)) %>%
+  ungroup() %>%
+  group_by(true_model, fit_model) %>%
+  summarise(p = mean(best_model), .groups = "drop") %>%
+  # Plotting
+  mutate(
+    across(
+      c(true_model, fit_model),
+      ~case_when(
+        .x == "bfs_backward" ~ "BFS-backward",
+        .x == "bfs_forward" ~ "BFS-forward",
+        .x == "ideal_obs" ~ "Ideal observer",
+        .x == "sr" ~ "Successor Rep."
+      )
+    ),
+    true_model = fct_rev(true_model)
+  ) %>%
+  ggplot(aes(x=fit_model, y=true_model, fill=p)) +
+  theme_heatmap() +
+  geom_tile(show.legend = FALSE) +
+  geom_text(aes(label = round(p, 2), color = p < .5), show.legend = FALSE) +
+  scale_fill_viridis_c(limits = c(0, 1)) +
+  scale_color_manual(values = c("FALSE"="black", "TRUE"="white")) +
+  coord_fixed() +
+  xlab("Fit model") +
+  ylab("True model") +
+  ggtitle("Confusion matrix") +
+  theme(
+    axis.text.x = element_text(angle = 45, vjust = 1, hjust = 1),
+    legend.position = "bottom"
+  )
+
+plot_confusion_matrix
+
+if (knitting) {
+  ggsave(
+    filename = here("outputs", workflow_name, "model_confusion.pdf"),
+    plot = plot_confusion_matrix,
+    width = 5, height = 5,
+    units = "in", dpi = 300
+  )
+}
+```
+
+
+# Inversion matrix
+
+The inversion matrix specifies $p(\text{true model} = Y \vert \text{fit model} = X)$, and is useful when interpreting parameter estimates from real subjects' data, as the true model is unknown.
+
+```{r plot-inversion-matrix}
+plot_inversion_matrix <- aicc %>%
+  group_by(sub_id, true_model) %>%
+  mutate(best_model = aicc == min(aicc)) %>%
+  ungroup() %>%
+  group_by(true_model, fit_model) %>%
+  summarise(p = mean(best_model), .groups = "drop") %>%
+  # Inversion
+  group_by(fit_model) %>%
+  mutate(p = p / sum(p)) %>%
+  ungroup() %>%
+  # Plotting
+  mutate(
+    across(
+      c(true_model, fit_model),
+      ~case_when(
+        .x == "bfs_backward" ~ "BFS-backward",
+        .x == "bfs_forward" ~ "BFS-forward",
+        .x == "ideal_obs" ~ "Ideal observer",
+        .x == "sr" ~ "Successor Rep."
+      )
+    ),
+    true_model = fct_rev(true_model)
+  ) %>%
+  ggplot(aes(x=fit_model, y=true_model, fill=p)) +
+  theme_heatmap() +
+  geom_tile(show.legend = FALSE) +
+  geom_text(aes(label = round(p, 2), color = p < .5), show.legend = FALSE) +
+  scale_fill_viridis_c(limits = c(0, 1)) +
+  scale_color_manual(values = c("FALSE"="black", "TRUE"="white")) +
+  coord_fixed() +
+  xlab("Fit model") +
+  ylab("True model") +
+  ggtitle("Inversion matrix") +
+  theme(
+    axis.text.x = element_text(angle = 45, vjust = 1, hjust = 1),
+    legend.position = "bottom"
+  )
+
+plot_inversion_matrix
+
+if (knitting) {
+  ggsave(
+    filename = here("outputs", workflow_name, "model_inversion.pdf"),
+    plot = plot_inversion_matrix,
+    width = 5, height = 5,
+    units = "in", dpi = 300
+  )
+}
+```
+
+
+# PXP
+
+Finally, we might be curious to see whether we can use protected exceedance probability (PXP) to make reliable inferences about the most probable group-level model. Note that this analysis is likely to be over-optimistic, as the simulated data were noise-free.
+
+```{r pxp}
+pxp_results <- aicc %>%
+  select(sub_id, true_model, fit_model, aicc) %>%
+  # In the PXP analysis, more is more, so sign-flip AICc so that greater values
+  # indicate better fit
+  mutate(aicc = -aicc) %>%
+  pivot_wider(names_from = fit_model, values_from = aicc) %>%
+  select(-sub_id) %>%
+  group_by(true_model) %>%
+  nest() %>%
+  mutate(
+    test = map(
+      .x = data,
+      .f = ~bayesian_model_selection(.x)
+    )
+  ) %>%
+  unnest(test) %>%
+  ungroup() %>%
+  select(-data)
+
+plot_pxp <- pxp_results %>%
+  mutate(
+    across(
+      c(true_model, model),
+      ~case_when(
+        .x == "bfs_backward" ~ "BFS-B",
+        .x == "bfs_forward" ~ "BFS-F",
+        .x == "ideal_obs" ~ "Ideal obs.",
+        .x == "sr" ~ "Successor Rep."
+      )
+    )
+  )  %>%
+  ggplot(aes(x=true_model, y=pxp, fill=model)) +
+  theme_custom() +
+  geom_col(position = "dodge") +
+  scale_fill_viridis_d(name = "Fit model") +
+  xlab("True model") +
+  theme(legend.position = "bottom")
+
+plot_pxp
+
+if (knitting) {
+  ggsave(
+    filename = here("outputs", workflow_name, "pxp.pdf"),
+    plot = plot_pxp,
+    width = 5, height = 2.5,
+    units = "in", dpi = 300
+  )
+}
+```
+
+
+# Figure for supplement
+
+In the supplement, we'll want a plot of both the confusion and inversion matrices.
+
+```{r plot-model-recovery-for-supp}
+plot_confusion_for_supp <- wrap_plots(
+  plot_confusion_matrix,
+  plot_inversion_matrix,
+  nrow = 1
+) +
+  plot_annotation(
+    title = "Model recovery",
+    theme = theme(plot.title = element_text(hjust = 0.5)),
+    tag_levels = "A", tag_suffix = "."
+  )
+
+plot_confusion_for_supp
+
+if (knitting) {
+  ggsave(
+    filename = here("figures", "supp_model_recovery.pdf"),
+    plot = plot_confusion_for_supp,
+    width = 8, height = 4,
+    units = "in", dpi = 300
+  )
+}
+```
+

@@ -1,0 +1,1826 @@
+---
+title: "Simulate behavior from models"
+output:
+  html_document:
+    code_download: true
+    code_folding: hide
+    toc: true
+    toc_float:
+      collapsed: true
+---
+
+# Goal
+
+Before jumping into parameter recovery, it'd be useful to know what parameter values are worth testing for each of our models. Our goal is therefore to develop an intuition about what kinds of behaviors are generated when we tweak the models' parameters, and to find suitable parameter ranges to simulate data from.
+
+In the case of the Successor Representation (SR), there are different variants / ways to implement this model, and so we want to make sure that arbitrary choices don't end up having unexpected impacts.
+
+Finally, we'll want to simulate behaviors from many agents, so that we can get a sense for how well we can recover parameters' ground-truth values using our parameter estimation procedure.
+
+
+# Setup
+
+```{r libraries}
+workflow_name <- "netnav_02_simulate_model_behaviors"
+
+library(tidyverse)
+library(here)
+library(patchwork)
+
+source(here("code", "utils", "modeling_utils.R"))
+source(here("code", "utils", "representation_utils.R"))
+
+source(here("code", "utils", "ggplot_themes.R"))
+source(here("code", "utils", "kable_utils.R"))
+source(here("code", "utils", "unicode_greek.R"))
+
+knitting <- knitr::is_html_output()
+
+create_path <- function(this_path) {
+  if (!dir.exists(this_path)) {
+    dir.create(this_path, recursive = TRUE)
+  }
+}
+
+if (knitting) {
+  here("figures") %>%
+    create_path()
+  
+  here("outputs", workflow_name) %>%
+    create_path()
+  
+  here("data", "simulated_model_behaviors") %>%
+    create_path()
+}
+```
+
+```{r load-data}
+bfs_backward_sims <- here(
+  "data", "bfs_sims", "bfs_sims_learned_backward.csv"
+) %>%
+  read_csv(show_col_types = FALSE) %>%
+  filter(
+    shortest_path_given_opts == shortest_path_given_start_end,
+    two_correct_options == FALSE
+  ) %>%
+  mutate(shortest_path = factor(shortest_path_given_opts)) %>%
+  select(-starts_with("shortest_path_given"), -two_correct_options) %>%
+  group_by(
+    shortest_path, startpoint_id, endpoint_id, opt1_id, opt2_id, correct_choice
+  ) %>%
+  summarise(
+    p_bfs_correct = mean(bfs_choice == correct_choice),
+    p_bfs_chooses_opt1 = mean(bfs_choice == opt1_id),
+    bfs_visits = mean(bfs_n_visits_total),
+    .groups = "drop"
+  )
+
+bfs_forward_sims <- here("data", "bfs_sims", "bfs_sims_learned_forward.csv") %>%
+  read_csv(show_col_types = FALSE) %>%
+  filter(
+    shortest_path_given_opts == shortest_path_given_start_end,
+    two_correct_options == FALSE
+  ) %>%
+  mutate(shortest_path = factor(shortest_path_given_opts)) %>%
+  select(-starts_with("shortest_path_given"), -two_correct_options) %>%
+  group_by(
+    shortest_path, startpoint_id, endpoint_id, opt1_id, opt2_id, correct_choice
+  ) %>%
+  summarise(
+    p_bfs_correct = mean(bfs_choice == correct_choice),
+    p_bfs_chooses_opt1 = mean(bfs_choice == opt1_id),
+    bfs_visits = mean(bfs_n_visits_total),
+    .groups = "drop"
+  )
+
+nav_trials <- here("data", "clean_data", "study1_message_passing.csv") %>%
+  read_csv(show_col_types = FALSE) %>%
+  filter(
+    two_correct_options == FALSE,
+    shortest_path_given_opts == shortest_path_given_start_end
+  ) %>%
+  mutate(shortest_path = factor(shortest_path_given_opts)) %>%
+  filter(sub_id == 1) %>%
+  select(
+    shortest_path,
+    startpoint_id, endpoint_id,
+    opt1_id, opt2_id,
+    correct_choice,
+    opt1_distance = dist_opt1,
+    opt2_distance = dist_opt2
+  ) %>%
+  arrange(shortest_path, startpoint_id, endpoint_id, opt1_id, opt2_id) %>%
+  # Replace undefined distances (corresponding to impossible options)
+  # so that the softmax gets non-NA inputs; we assume that impossible
+  # options are just as bad as the longest distance found in this set
+  # of trials, i.e., a distance of 8
+  mutate(across(c(opt1_distance, opt2_distance), ~replace_na(.x, 8)))
+
+adjlist <- here("data", "clean_data", "adjlist_learned.csv") %>%
+  read_csv(show_col_types = FALSE)
+
+transmat <- adjlist %>%
+  group_by(from) %>%
+  mutate(edge = edge / sum(edge)) %>%
+  ungroup() %>%
+  pivot_wider(names_from = to, values_from = edge) %>%
+  column_to_rownames("from") %>%
+  as.matrix()
+```
+
+
+# BFS-backward
+
+## Model predictions
+
+BFS-backward only has a single "search threshold" parameter that controls the agent's tendency to "give up" and choose randomly depending on the length/difficulty of the search process.
+
+```{r bfs-backward-predicted}
+predicted_bfs_backward <- expand_grid(
+  search_threshold = 1:20,
+  bfs_backward_sims
+) %>%
+  # What's the probability of *completing* BFS-online all the way through?
+  rowwise() %>%
+  mutate(
+    p_complete_bfs = softmax(
+      option_values = c(search_threshold, bfs_visits),
+      option_chosen = 1,
+      temperature = 1
+    )
+  ) %>%
+  ungroup() %>%
+  # Weigh BFS predictions accordingly
+  mutate(
+    p_give_up = 1 - p_complete_bfs,
+    p_correct = (p_complete_bfs * p_bfs_correct) + (p_give_up * 1/2)
+  )
+```
+
+When plotting out the predicted behavior from this agent, we see that the model predictions "saturate" to their asymptotic behaviors at a threshold around 15 or so.
+
+```{r plot-bfs-backward}
+#| fig.width=6, fig.height=6
+
+plot_bfs_backward_trials <- predicted_bfs_backward %>%
+  mutate(
+    search_threshold = str_c(
+      "Threshold=",
+      str_pad(search_threshold, width = 2, side = "left", pad = "0")
+    )
+  ) %>%
+  ggplot(aes(x=shortest_path, y=p_correct)) +
+  theme_custom() +
+  facet_wrap(~search_threshold) +
+  geom_hline(yintercept = 0.5, linetype = "dashed") +
+  geom_point(alpha = 0.1) +
+  stat_summary(aes(group = 1), geom = "line", fun = mean, linewidth = 1) +
+  scale_x_discrete(name = "Shortest path distance") +
+  scale_y_continuous(
+    name = "Accuracy", labels = scales::percent, limits = c(0.5, 1)
+  ) +
+  ggtitle("Simulated BFS-backward")
+
+plot_bfs_backward_summary <- predicted_bfs_backward %>%
+  group_by(search_threshold, shortest_path) %>%
+  summarise(p_correct = mean(p_correct), .groups = "drop") %>%
+  ggplot(aes(x=shortest_path, y=p_correct, color=search_threshold)) +
+  theme_custom() +
+  geom_hline(yintercept = 0.5, linetype = "dashed") +
+  geom_line(aes(group = search_threshold)) +
+  scale_color_viridis_c(name = "Threshold", option = "turbo", end = 0.9) +
+  scale_x_discrete(name = "Shortest path distance") +
+  scale_y_continuous(
+    name = "Accuracy", labels = scales::percent, limits = c(0.5, 1)
+  ) +
+  theme(legend.position = "bottom") +
+  ggtitle("Simulated BFS-backward")
+
+plot_bfs_backward_trials
+plot_bfs_backward_summary
+
+if (knitting) {
+  ggsave(
+    filename = here("outputs", workflow_name, "bfs_backward_trials.pdf"),
+    plot = plot_bfs_backward_trials,
+    width = 6, height = 6,
+    units = "in", dpi = 300
+  )
+  
+  ggsave(
+    filename = here("outputs", workflow_name, "bfs_backward_summary.pdf"),
+    plot = plot_bfs_backward_summary,
+    width = 5, height = 5,
+    units = "in", dpi = 300
+  )
+}
+```
+
+Increases in the threshold parameter continue to affect distance-4 behaviors up until saturation, so let's look at how correlated the predicted behaviors are at various thresholds. We can see that we reach essentially perfect correlation by the time we reach a threshold of 10, though visual inspection of the above plots clearly shows that there are still accuracy improvements past then. Therefore, to err on the side of being a little too liberal (which has the tendency of making parameter recovery a bit worse), we'll stick with a threshold of 15.
+
+```{r corr-bfs-backward}
+#| fig.width=8, fig.height=8
+
+plot_bfs_backward_corr <- predicted_bfs_backward %>%
+  filter(shortest_path == 4) %>%
+  select(search_threshold:opt2_id, p_correct) %>%
+  pivot_wider(names_from = search_threshold, values_from = p_correct) %>%
+  select(-c(shortest_path:opt2_id)) %>%
+  cor() %>%
+  as.data.frame() %>%
+  rownames_to_column("from") %>%
+  pivot_longer(-from, names_to = "to", values_to = "corr") %>%
+  # Plotting
+  mutate(
+    across(c(from, to), as.integer),
+    across(c(from, to), factor),
+    from = fct_rev(from),
+    text = round(corr, 2),
+    above_midpoint = corr > 0.5
+  ) %>%
+  filter(from != to) %>%
+  ggplot(aes(x=to, y=from, fill=corr)) +
+  theme_heatmap() +
+  geom_tile(show.legend = FALSE) +
+  geom_text(aes(label = text, color = above_midpoint), show.legend = FALSE) +
+  scale_fill_viridis_c(limits = c(0, 1)) +
+  scale_color_manual(values = c("FALSE"="white", "TRUE"="black")) +
+  coord_fixed() +
+  ggtitle(
+    "BFS-backward threshold correlation matrix",
+    subtitle = "(for predicted distance-4 behavior)"
+  )
+
+plot_bfs_backward_corr
+
+if (knitting) {
+  ggsave(
+    filename = here("outputs", workflow_name, "bfs_backward_corr.pdf"),
+    plot = plot_bfs_backward_corr,
+    width = 8, height = 8,
+    units = "in", dpi = 300
+  )
+}
+```
+
+
+## Simulate behavior
+
+The final step is to actually simulate behaviors from many agents. We'll later run this behavior through our parameter-fitting scripts to see how well we can recover them.
+
+```{r sim-bfs-backward}
+set.seed(sum(utf8ToInt("Ain't I the best you had?")))
+
+sim_params_bfs_backward <- tibble(
+  sub_id = 1:500,
+  search_threshold = runif(n = 500, min = 1, max = 15)
+)
+
+sim_behav_bfs_backward <- expand_grid(
+  sub_id = 1:500,
+  bfs_backward_sims
+) %>%
+  # Add subject-specific parameters
+  left_join(sim_params_bfs_backward, by = join_by(sub_id)) %>%
+  # What's the probability of *completing* BFS-online all the way through?
+  rowwise() %>%
+  mutate(
+    p_complete_bfs = softmax(
+      option_values = c(search_threshold, bfs_visits),
+      option_chosen = 1,
+      temperature = 1
+    )
+  ) %>%
+  ungroup() %>%
+  # Weigh BFS predictions accordingly
+  mutate(
+    p_give_up = 1 - p_complete_bfs,
+    p_choose_opt1 = (
+      (p_complete_bfs * p_bfs_chooses_opt1) + (p_give_up * 1/2)
+    )
+  ) %>%
+  # Make binary choice in proportion to the probability of choosing opt1
+  rowwise() %>%
+  mutate(
+    simulated_choice = sample(
+      c(opt1_id, opt2_id), size = 1, prob = c(p_choose_opt1, 1-p_choose_opt1)
+    )
+  ) %>%
+  ungroup()
+
+plot_param_dist_bfs_backward <- sim_params_bfs_backward %>%
+  ggplot(aes(x=search_threshold)) +
+  theme_custom() +
+  geom_histogram(binwidth = 1) +
+  xlab("Search threshold") +
+  ggtitle("BFS-backward: Simulated parameter distribution")
+
+plot_param_dist_bfs_backward
+
+if (knitting) {
+  ggsave(
+    filename = here("outputs", workflow_name, "bfs_backward_param_dist.pdf"),
+    plot = plot_param_dist_bfs_backward,
+    width = 5, height = 5,
+    units = "in", dpi = 300
+  )
+  
+  sim_behav_bfs_backward %>%
+    write_csv(
+      here(
+        "data", "simulated_model_behaviors",
+        "sim_nav_bfs_backward_no_lapse.csv"
+      )
+    )
+}
+```
+
+
+# BFS-forward
+
+## Model predictions
+
+Like BFS-backward, BFS-forward only has a single "search threshold" parameter.
+
+```{r bfs-forward-predicted}
+predicted_bfs_forward <- expand_grid(
+  search_threshold = 1:20,
+  bfs_forward_sims
+) %>%
+  # What's the probability of *completing* BFS-online all the way through?
+  rowwise() %>%
+  mutate(
+    p_complete_bfs = softmax(
+      option_values = c(search_threshold, bfs_visits),
+      option_chosen = 1,
+      temperature = 1
+    )
+  ) %>%
+  ungroup() %>%
+  # Weigh BFS predictions accordingly
+  mutate(
+    p_give_up = 1 - p_complete_bfs,
+    p_correct = (p_complete_bfs * p_bfs_correct) + (p_give_up * 1/2)
+  )
+```
+
+We can see that by the time we get to a threshold value of 15, the predicted representation is basically saturated.
+
+```{r plot-bfs-forward}
+#| fig.width=6, fig.height=6
+
+plot_bfs_forward_trials <- predicted_bfs_forward %>%
+  mutate(
+    search_threshold = str_c(
+      "Threshold=",
+      str_pad(search_threshold, width = 2, side = "left", pad = "0")
+    )
+  ) %>%
+  ggplot(aes(x=shortest_path, y=p_correct)) +
+  theme_custom() +
+  facet_wrap(~search_threshold) +
+  geom_hline(yintercept = 0.5, linetype = "dashed") +
+  geom_point(alpha = 0.1) +
+  stat_summary(aes(group = 1), geom = "line", fun = mean, linewidth = 1) +
+  scale_x_discrete(name = "Shortest path distance") +
+  scale_y_continuous(
+    name = "Accuracy", labels = scales::percent, limits = c(0.5, 1)
+  ) +
+  ggtitle("Simulated BFS-forward")
+
+plot_bfs_forward_summary <- predicted_bfs_forward %>%
+  group_by(search_threshold, shortest_path) %>%
+  summarise(p_correct = mean(p_correct), .groups = "drop") %>%
+  ggplot(aes(x=shortest_path, y=p_correct, color=search_threshold)) +
+  theme_custom() +
+  geom_hline(yintercept = 0.5, linetype = "dashed") +
+  geom_line(aes(group = search_threshold)) +
+  scale_color_viridis_c(name = "Threshold", option = "turbo", end = 0.9) +
+  scale_x_discrete(name = "Shortest path distance") +
+  scale_y_continuous(
+    name = "Accuracy", labels = scales::percent, limits = c(0.5, 1)
+  ) +
+  theme(legend.position = "bottom") +
+  ggtitle("Simulated BFS-forward")
+
+plot_bfs_forward_trials
+plot_bfs_forward_summary
+
+if (knitting) {
+  ggsave(
+    filename = here("outputs", workflow_name, "bfs_forward_trials.pdf"),
+    plot = plot_bfs_forward_trials,
+    width = 6, height = 6,
+    units = "in", dpi = 300
+  )
+  
+  ggsave(
+    filename = here("outputs", workflow_name, "bfs_forward_summary.pdf"),
+    plot = plot_bfs_forward_summary,
+    width = 5, height = 5,
+    units = "in", dpi = 300
+  )
+}
+```
+
+Reflecting this, the below correlation matrix suggests that a threshold of 16 makes (near-)perfectly correlated predictions as a threshold of 20. We'll stick with 16 for the purpose of simulation.
+
+```{r corr-bfs-forward}
+#| fig.width=8, fig.height=8
+
+plot_bfs_forward_corr <- predicted_bfs_forward %>%
+  filter(shortest_path == 4) %>%
+  select(search_threshold:opt2_id, p_correct) %>%
+  pivot_wider(names_from = search_threshold, values_from = p_correct) %>%
+  select(-c(shortest_path:opt2_id)) %>%
+  cor() %>%
+  as.data.frame() %>%
+  rownames_to_column("from") %>%
+  pivot_longer(-from, names_to = "to", values_to = "corr") %>%
+  # Plotting
+  mutate(
+    across(c(from, to), as.integer),
+    across(c(from, to), factor),
+    from = fct_rev(from),
+    text = round(corr, 2),
+    above_midpoint = corr > 0.5
+  ) %>%
+  filter(from != to) %>%
+  ggplot(aes(x=to, y=from, fill=corr)) +
+  theme_heatmap() +
+  geom_tile(show.legend = FALSE) +
+  geom_text(aes(label = text, color = above_midpoint), show.legend = FALSE) +
+  scale_fill_viridis_c(limits = c(0, 1)) +
+  scale_color_manual(values = c("FALSE"="white", "TRUE"="black")) +
+  coord_fixed() +
+  ggtitle(
+    "BFS-forward threshold correlation matrix",
+    subtitle = "(for predicted distance-4 behavior)"
+  )
+
+plot_bfs_forward_corr
+
+if (knitting) {
+  ggsave(
+    filename = here("outputs", workflow_name, "bfs_forward_corr.pdf"),
+    plot = plot_bfs_forward_corr,
+    width = 8, height = 8,
+    units = "in", dpi = 300
+  )
+}
+```
+
+## Simulate behavior
+
+Note that, in a previous version of this work, we had estimated parameters for a BFS-forward model including a lapse rate parameter. It turns out that the lapse rate parameter has poor recoverability, and also seemed to bias the estimation of other parameters. To verify this, we'll simulate two sets of behaviors: one that includes/is affected by a lapse rate, and another that does not include a lapse rate.
+
+```{r sim-bfs-forward}
+set.seed(sum(utf8ToInt("Slouching towards Bethlehem")))
+
+sim_params_bfs_forward <- tibble(
+  sub_id = 1:500,
+  search_threshold = runif(n = 500, min = 1, max = 16),
+  lapse_rate = runif(n = 500, min = 0, max = 1)
+)
+
+sim_behav_bfs_forward <- expand_grid(
+  sub_id = 1:500,
+  bfs_forward_sims
+) %>%
+  # Add subject-specific parameters
+  left_join(sim_params_bfs_forward, by = join_by(sub_id)) %>%
+  select(-lapse_rate) %>%
+  # What's the probability of *completing* BFS-online all the way through?
+  rowwise() %>%
+  mutate(
+    p_complete_bfs = softmax(
+      option_values = c(search_threshold, bfs_visits),
+      option_chosen = 1,
+      temperature = 1
+    )
+  ) %>%
+  ungroup() %>%
+  # Weigh BFS predictions accordingly
+  mutate(
+    p_give_up = 1 - p_complete_bfs,
+    p_choose_opt1 = (
+      (p_complete_bfs * p_bfs_chooses_opt1) + (p_give_up * 1/2)
+    )
+  ) %>%
+  # Make binary choice in proportion to the probability of choosing opt1
+  rowwise() %>%
+  mutate(
+    simulated_choice = sample(
+      c(opt1_id, opt2_id), size = 1, prob = c(p_choose_opt1, 1-p_choose_opt1)
+    )
+  ) %>%
+  ungroup()
+
+sim_behav_bfs_forward_with_lapse <- expand_grid(
+  sub_id = 1:500,
+  bfs_forward_sims
+) %>%
+  # Add subject-specific parameters
+  left_join(sim_params_bfs_forward, by = join_by(sub_id)) %>%
+  # What's the probability of *completing* BFS-online all the way through?
+  rowwise() %>%
+  mutate(
+    p_complete_bfs = softmax(
+      option_values = c(search_threshold, bfs_visits),
+      option_chosen = 1,
+      temperature = 1
+    )
+  ) %>%
+  ungroup() %>%
+  # Weigh BFS predictions accordingly
+  mutate(
+    p_give_up = 1 - p_complete_bfs,
+    p_choose_opt1 = (
+      (p_complete_bfs * p_bfs_chooses_opt1) + (p_give_up * 1/2)
+    ),
+    # Add lapse rate
+    # Dividing by 2 is because there are two options to choose from
+    # Therefore, when lapse rate = 1, this becomes chance = 1/2
+    p_choose_opt1 = p_choose_opt1 * (1-lapse_rate) + (lapse_rate/2)
+  ) %>%
+  # Make binary choice in proportion to the probability of choosing opt1
+  rowwise() %>%
+  mutate(
+    simulated_choice = sample(
+      c(opt1_id, opt2_id), size = 1, prob = c(p_choose_opt1, 1-p_choose_opt1)
+    )
+  ) %>%
+  ungroup()
+
+plot_param_dist_bfs_forward <- sim_params_bfs_forward %>%
+  ggplot(aes(x=search_threshold)) +
+  theme_custom() +
+  geom_histogram(binwidth = 1) +
+  xlab("Search threshold") +
+  ggtitle("BFS-forward: Simulated parameter distribution")
+
+plot_param_dist_bfs_forward
+
+if (knitting) {
+  ggsave(
+    filename = here("outputs", workflow_name, "bfs_forward_param_dist.pdf"),
+    plot = plot_param_dist_bfs_forward,
+    width = 5, height = 5,
+    units = "in", dpi = 300
+  )
+  
+  sim_behav_bfs_forward %>%
+    write_csv(
+      here(
+        "data", "simulated_model_behaviors",
+        "sim_nav_bfs_forward_no_lapse.csv"
+      )
+    )
+  
+  sim_behav_bfs_forward_with_lapse %>%
+    write_csv(
+      here(
+        "data", "simulated_model_behaviors",
+        "sim_nav_bfs_forward_with_lapse.csv"
+      )
+    )
+}
+```
+
+
+# Ideal observer
+
+## Model predictions
+
+The ideal observer has, in principle, all of the information necessary to respond with perfect accuracy in the task. However, it may still continue to behave noisily, which is captured by a single softmax (inverse) temperature parameter.
+
+```{r ideal-obs-predicted}
+predicted_ideal_obs <- expand_grid(
+  softmax_temperature = -(1:20),
+  nav_trials
+) %>%
+  rowwise() %>%
+  mutate(
+    p_correct = softmax(
+      option_values = c(opt1_distance, opt2_distance),
+      option_chosen = if_else(opt1_id == correct_choice, 1, 2),
+      temperature = softmax_temperature,
+      use_inverse_temperature = TRUE
+    )
+  ) %>%
+  ungroup()
+```
+
+It becomes clear that the predicted behavior rapidly saturates, perhaps as soon as inverse temperature = -5.
+
+```{r plot-ideal-obs}
+#| fig.width=6, fig.height=6
+
+plot_ideal_obs_trials <- predicted_ideal_obs %>%
+  mutate(
+    softmax_temperature = str_c(
+      "Inv. temp.=-",
+      str_pad(-softmax_temperature, width = 2, side = "left", pad = "0")
+    )
+  ) %>%
+  ggplot(aes(x=shortest_path, y=p_correct)) +
+  theme_custom() +
+  facet_wrap(~softmax_temperature) +
+  geom_hline(yintercept = 0.5, linetype = "dashed") +
+  geom_point(alpha = 0.1) +
+  stat_summary(aes(group = 1), geom = "line", fun = mean, linewidth = 1) +
+  scale_x_discrete(name = "Shortest path distance") +
+  scale_y_continuous(
+    name = "Accuracy", labels = scales::percent, limits = c(0.5, 1)
+  ) +
+  ggtitle("Simulated ideal observer")
+
+plot_ideal_obs_summary <- predicted_ideal_obs %>%
+  group_by(softmax_temperature, shortest_path) %>%
+  summarise(p_correct = mean(p_correct), .groups = "drop") %>%
+  ggplot(aes(x=shortest_path, y=p_correct, color=softmax_temperature)) +
+  theme_custom() +
+  geom_hline(yintercept = 0.5, linetype = "dashed") +
+  geom_line(aes(group = softmax_temperature)) +
+  scale_color_viridis_c(
+    name = "Inv. temp.", option = "turbo", end = 0.9, direction = -1
+  ) +
+  scale_x_discrete(name = "Shortest path distance") +
+  scale_y_continuous(
+    name = "Accuracy", labels = scales::percent, limits = c(0.5, 1)
+  ) +
+  theme(legend.position = "bottom") +
+  ggtitle("Simulated ideal observer")
+
+plot_ideal_obs_trials
+plot_ideal_obs_summary
+
+if (knitting) {
+  ggsave(
+    filename = here("outputs", workflow_name, "ideal_obs_trials.pdf"),
+    plot = plot_ideal_obs_trials,
+    width = 6, height = 6,
+    units = "in", dpi = 300
+  )
+  
+  ggsave(
+    filename = here("outputs", workflow_name, "ideal_obs_summary.pdf"),
+    plot = plot_ideal_obs_summary,
+    width = 5, height = 5,
+    units = "in", dpi = 300
+  )
+}
+```
+
+This is reflected in the correlation matrix. For the purpose of simulation, we'll limit the range to -5.
+
+```{r corr-ideal-obs}
+#| fig.width=8, fig.height=8
+
+plot_ideal_obs_corr <- predicted_ideal_obs %>%
+  select(softmax_temperature:opt2_id, p_correct) %>%
+  pivot_wider(names_from = softmax_temperature, values_from = p_correct) %>%
+  select(-c(shortest_path:opt2_id)) %>%
+  cor() %>%
+  as.data.frame() %>%
+  rownames_to_column("from") %>%
+  pivot_longer(-from, names_to = "to", values_to = "corr") %>%
+  # Plotting
+  mutate(
+    across(c(from, to), as.integer),
+    across(c(from, to), factor),
+    to = fct_rev(to),
+    text = round(corr, 2),
+    above_midpoint = corr > 0.5
+  ) %>%
+  filter(from != to) %>%
+  ggplot(aes(x=to, y=from, fill=corr)) +
+  theme_heatmap() +
+  geom_tile(show.legend = FALSE) +
+  geom_text(aes(label = text, color = above_midpoint), show.legend = FALSE) +
+  scale_fill_viridis_c(limits = c(0, 1)) +
+  scale_color_manual(values = c("FALSE"="white", "TRUE"="black")) +
+  coord_fixed() +
+  ggtitle(
+    "Ideal observer inverse temperature correlation matrix",
+    subtitle = "(for behavior across all distances)"
+  )
+
+plot_ideal_obs_corr
+
+if (knitting) {
+  ggsave(
+    filename = here("outputs", workflow_name, "ideal_obs_corr.pdf"),
+    plot = plot_ideal_obs_corr,
+    width = 8, height = 8,
+    units = "in", dpi = 300
+  )
+}
+```
+
+## Simulate behavior
+
+```{r sim-ideal-obs}
+set.seed(sum(utf8ToInt("Maybe the emptiness is just a lesson in canvases")))
+
+sim_params_ideal_obs <- tibble(
+  sub_id = 1:500,
+  softmax_temperature = runif(n = 500, min = -5, max = 0)
+)
+
+sim_behav_ideal_obs <- expand_grid(
+  sub_id = 1:500,
+  nav_trials
+) %>%
+  # Add subject-specific parameters
+  left_join(sim_params_ideal_obs, by = join_by(sub_id)) %>%
+  rowwise() %>%
+  mutate(
+    p_choose_opt1 = softmax(
+      option_values = c(opt1_distance, opt2_distance),
+      option_chosen = 1,
+      temperature = softmax_temperature,
+      use_inverse_temperature = TRUE
+    ),
+    simulated_choice = sample(
+      c(opt1_id, opt2_id), size = 1, prob = c(p_choose_opt1, 1-p_choose_opt1)
+    )
+  ) %>%
+  ungroup()
+
+plot_param_dist_ideal_obs <- sim_params_ideal_obs %>%
+  ggplot(aes(x=softmax_temperature)) +
+  theme_custom() +
+  geom_histogram(binwidth = 0.5) +
+  xlab("Inverse temperature") +
+  ggtitle("Ideal observer: Simulated parameter distribution")
+
+plot_param_dist_ideal_obs
+
+if (knitting) {
+  ggsave(
+    filename = here("outputs", workflow_name, "ideal_obs_param_dist.pdf"),
+    plot = plot_param_dist_ideal_obs,
+    width = 5, height = 5,
+    units = "in", dpi = 300
+  )
+  
+  sim_behav_ideal_obs %>%
+    write_csv(
+      here(
+        "data", "simulated_model_behaviors",
+        "sim_nav_ideal_obs_no_lapse.csv"
+      )
+    )
+}
+```
+
+
+# Successor Representation
+
+## Overview and context
+
+In a previous version of this work, we used a version of the Successor Representation (SR) that included a lapse rate parameter. As with BFS-forward, the lapse rate parameter ends up being hard to recover, and biases the estimation of other parameters.
+
+In this work, we often want to simulate an "asymptotic" Successor Representation (SR). However, when using a delta-rule updating mechanism to "learn from observation", there will inevitably be some small amount of stochasticity associated with the choice of observations. We had previously used a delta-rule mechanism in conjunction with a relatively large number of simulated learning observations, but our implementation allowed for stochasticity in the exact ordering of these observations, which (in principle) results in the predicted representation being slightly different.
+
+In the revision, we'll try two strategies for getting rid of unnecessary stochasticity in the parameter estimation process: 1) using a closed-form analytic solution to computing SRs, and 2) using a constant set of simulated "observations" so that the delta-rule SR consistently predicts the same representation (given the same parameters). There are, theoretically, benefits and drawbacks to both approaches, so we'll want to try them both. The spoiler alert is that, at least for this work, both variants produce similar enough patterns of results that it functionally doesn't matter which is used (i.e., the interpretation of results is identical).
+
+Finally, SR-like implementations of multistep abstraction can either be conceptualized as encoding information about the *number* of times an agent is expected to end up in a given state, or else the *probability* of an agent ending up in that state. We have chosen to use an implementation that encodes probabilities, but there may be concerns that this is a researcher degree of freedom. To address this concern, we'll also demonstrate here that both implementations contain identical information, and that it is ultimately inconsequential which implementation is used.
+
+## Analytic SR
+
+In past research, people have generated asymptotic SRs using the following closed-form analytic solution:
+
+$M = (I - \gamma T)^{-1}$
+
+where $M$ is the SR matrix, $I$ is the identity matrix, $\gamma$ is the successor horizon/discount, $T$ is the true transition matrix, and where $X^{-1}$ refers to the matrix inverse.
+
+Note that the "out-of-the-box" SR produces a matrix of counts (more technically, "expected discounted future visitations", but this is quite the mouthful). Specifically, the counts quantify "if I start at state X and take a random walk of length L, how many times should I expect to end up in state Y?" The term $L$ can be thought of as a "lookahead" horizon, and is related to $\gamma$ through the following equations: $L = \frac{1}{1-\gamma}$ and $\gamma = 1 - \frac{1}{L}$. Therefore, the SR can be normalized as a matrix of probabilities: $M_{\text{probabilities}} \leftarrow M_{\text{counts}} \times \frac{1}{L}$, which quantify "if I start at state X and take a random walk of length L, what's the probability of me ending up in state Y?".
+
+In a moment, we'll verify that the count and probability matrices contain the same information and result in identical predicted behaviors in the social navigation task.
+
+```{r analytic-sr-rep}
+sr_analytic_counts <- map_dfr(
+  .x = round(seq(0.1, 0.9, 0.1), 2),
+  .f = ~build_successor_analytically(
+    transition_matrix = transmat,
+    successor_horizon = .x,
+    normalize = FALSE
+  )
+)
+
+sr_analytic_probs <- map_dfr(
+  .x = round(seq(0.1, 0.9, 0.1), 2),
+  .f = ~build_successor_analytically(
+    transition_matrix = transmat,
+    successor_horizon = .x,
+    normalize = TRUE
+  )
+)
+```
+
+While it's nice to have some theoretical guarantees about asymptotic representation, as well as an elegant closed-form equation, this is far from being an assumption-free solution. Specifically, the analytic solution assumes that the strongest contributor to representation is the identity matrix (i.e., state X transitioning to itself). This becomes clearer when writing out the analytic solution as a summation:
+
+$M = \sum_{k=0}^\infty \gamma^k T^k$
+
+As the $\gamma^k$ term specifies the exponential discount/decay factor, $\gamma^0 T^0 = I$ is quite literally the most heavily-weighted term in the summation.
+
+We can see this pretty clearly when plotting the predicted representations:
+
+```{r plot-analytic-sr-rep}
+#| fig.width=8, fig.height=6
+
+plot_sr_analytic_counts <- sr_analytic_counts %>%
+  mutate(
+    across(c(from, to), factor),
+    from = fct_rev(from),
+    sr_gamma = str_c(unicode_greek["gamma"], "=", sr_gamma)
+  ) %>%
+  ggplot(aes(x=to, y=from, fill=sr_value)) +
+  theme_heatmap() +
+  facet_wrap(~sr_gamma) +
+  geom_tile() +
+  scale_fill_viridis_c(name = "SR counts") +
+  coord_fixed() +
+  ggtitle("Count matrix") +
+  theme(
+    legend.position = "bottom",
+    axis.text.x = element_blank(),
+    axis.text.y = element_blank(),
+    axis.ticks = element_blank()
+  )
+
+plot_sr_analytic_probs <- sr_analytic_probs %>%
+  mutate(
+    across(c(from, to), factor),
+    from = fct_rev(from),
+    sr_gamma = str_c(unicode_greek["gamma"], "=", sr_gamma)
+  ) %>%
+  ggplot(aes(x=to, y=from, fill=sr_value)) +
+  theme_heatmap() +
+  facet_wrap(~sr_gamma) +
+  geom_tile() +
+  scale_fill_viridis_c(name = "SR probabilities") +
+  coord_fixed() +
+  ggtitle("Probability matrix") +
+  theme(
+    legend.position = "bottom",
+    axis.text.x = element_blank(),
+    axis.text.y = element_blank(),
+    axis.ticks = element_blank()
+  )
+
+plot_sr_analytic_rep <- wrap_plots(
+  plot_sr_analytic_counts, plot_sr_analytic_probs,
+  nrow = 1
+) &
+  plot_annotation(
+    title = "Analytic SR",
+    theme = theme(
+      plot.title = element_text(hjust = 0.5),
+      legend.position = "bottom"
+    )
+  )
+
+plot_sr_analytic_rep
+
+if (knitting) {
+  ggsave(
+    filename = here("outputs", workflow_name, "sr_analytic_rep.pdf"),
+    plot = plot_sr_analytic_rep,
+    width = 8, height = 6,
+    units = "in", dpi = 300,
+    device = cairo_pdf
+  )
+}
+```
+
+At first glance, it looks like the count and probability matrices might contain different information. However, they are fundamentally the same. Let's verify that they make *exactly* the same contributions to behavior when the softmax (inverse) temperature parameter accounts for the fact that the probability matrix is normalized by the lookahead. Here, the temperature for the count matrix is $10$, and the temperature for the probability matrix is $10L = 10 \times \frac{1}{1-\gamma}$.
+
+```{r analytic-sr-predicted}
+predicted_sr_analytic_counts <- expand_grid(
+  sr_gamma = round(seq(0.1, 0.9, 0.1), 2),
+  nav_trials
+) %>%
+  left_join(
+    sr_analytic_counts %>%
+      rename(endpoint_id = to, opt1_id = from, opt1_sr = sr_value),
+    by = join_by(sr_gamma, endpoint_id, opt1_id)
+  ) %>%
+  left_join(
+    sr_analytic_counts %>%
+      rename(endpoint_id = to, opt2_id = from, opt2_sr = sr_value),
+    by = join_by(sr_gamma, endpoint_id, opt2_id)
+  ) %>%
+  rowwise() %>%
+  mutate(
+    p_correct = softmax(
+      option_values = c(opt1_sr, opt2_sr),
+      option_chosen = if_else(opt1_id == correct_choice, 1, 2),
+      temperature = 10,
+      use_inverse_temperature = TRUE
+    )
+  ) %>%
+  ungroup()
+
+predicted_sr_analytic_probs <- expand_grid(
+  sr_gamma = round(seq(0.1, 0.9, 0.1), 2),
+  nav_trials
+) %>%
+  left_join(
+    sr_analytic_probs %>%
+      rename(endpoint_id = to, opt1_id = from, opt1_sr = sr_value),
+    by = join_by(sr_gamma, endpoint_id, opt1_id)
+  ) %>%
+  left_join(
+    sr_analytic_probs %>%
+      rename(endpoint_id = to, opt2_id = from, opt2_sr = sr_value),
+    by = join_by(sr_gamma, endpoint_id, opt2_id)
+  ) %>%
+  rowwise() %>%
+  mutate(
+    lookahead = 1/(1-sr_gamma),
+    p_correct = softmax(
+      option_values = c(opt1_sr, opt2_sr),
+      option_chosen = if_else(opt1_id == correct_choice, 1, 2),
+      temperature = 10 * lookahead,
+      use_inverse_temperature = TRUE
+    )
+  ) %>%
+  ungroup()
+```
+
+We can see that there's a perfect correlation between the behavioral predictions made by the count- and probability-based matrices.
+
+```{r corr-analytic-sr-predicted}
+left_join(
+  predicted_sr_analytic_counts %>%
+    select(
+      sr_gamma, shortest_path,
+      startpoint_id, endpoint_id,
+      opt1_id, opt2_id,
+      p_correct_counts = p_correct
+    ),
+  predicted_sr_analytic_probs %>%
+    select(
+      sr_gamma, shortest_path,
+      startpoint_id, endpoint_id,
+      opt1_id, opt2_id,
+      p_correct_probs = p_correct
+    ),
+  by = join_by(
+    sr_gamma, shortest_path, startpoint_id, endpoint_id, opt1_id, opt2_id
+  )
+) %>%
+  group_by(sr_gamma) %>%
+  nest() %>%
+  mutate(
+    corr = map_dbl(
+      .x = data,
+      .f = ~with(.x, cor(p_correct_counts, p_correct_probs))
+    )
+  ) %>%
+  ungroup() %>%
+  select(-data) %>%
+  kable_custom(
+    captions = c(
+      "Correlations between predicted behavior from analytic SRs",
+      "(counts vs probabilities)"
+    )
+  )
+```
+
+And just to visually confirm, we can plot out the model predictions to confirm that the "monotonic relationship" being indexed by the correlation is actually "identity".
+
+```{r plot-analytic-sr}
+#| fig.width=6, fig.height=8
+
+plot_sr_analytic_nav <- left_join(
+  predicted_sr_analytic_counts %>%
+    select(
+      sr_gamma, shortest_path,
+      startpoint_id, endpoint_id,
+      opt1_id, opt2_id,
+      p_correct_counts = p_correct
+    ),
+  predicted_sr_analytic_probs %>%
+    select(
+      sr_gamma, shortest_path,
+      startpoint_id, endpoint_id,
+      opt1_id, opt2_id,
+      p_correct_probs = p_correct
+    ),
+  by = join_by(
+    sr_gamma, shortest_path, startpoint_id, endpoint_id, opt1_id, opt2_id
+  )
+) %>%
+  pivot_longer(
+    cols = starts_with("p_correct_"),
+    names_to = "method",
+    values_to = "p_correct"
+  ) %>%
+  mutate(
+    method = str_remove(method, "p_correct_"),
+    shortest_path = str_c("Shortest path distance ", shortest_path),
+    sr_gamma = str_c(unicode_greek["gamma"], "=", sr_gamma)
+  ) %>%
+  ggplot(aes(x=method, y=p_correct)) +
+  theme_custom() +
+  facet_grid(
+    rows = vars(sr_gamma),
+    cols = vars(shortest_path)
+  ) +
+  geom_line(
+    aes(group = interaction(startpoint_id, endpoint_id, opt1_id, opt2_id)),
+    alpha = 0.1
+  ) +
+  scale_x_discrete(
+    name = "Normalization method",
+    labels = c("counts"="Counts", "probs"="Probabilities")
+  ) +
+  scale_y_continuous(
+    name = "Accuracy",
+    labels = scales::percent,
+    breaks = seq(0.5, 1, 0.25)
+  ) +
+  ggtitle("Predicted navigation accuracy: Analytic SR")
+
+plot_sr_analytic_nav
+
+if (knitting) {
+  ggsave(
+    filename = here("outputs", workflow_name, "sr_analytic_count_vs_prob.pdf"),
+    plot = plot_sr_analytic_nav,
+    width = 6, height = 8,
+    units = "in", dpi = 300,
+    device = cairo_pdf
+  )
+}
+```
+
+## Delta-rule SR
+
+How does the "delta-rule" version of the SR compare? Let's generate a bunch of simulated "observations". Random walks can (and often do) get stuck within clusters/communities, so since we're explicitly interested in asymptotic representations, let's simulate a bunch of "paired associates" such that we cycle through all pairs (in random order) before cycling through all pairs again.
+
+Note that we'll generate more observations than we strictly need, just so that we have them on hand. Note also that we'll set a random seed in the next code cell to ensure that we always generate the same observations.
+
+```{r generate-observations}
+set.seed(sum(utf8ToInt("Watch them, take it on back, do the rewind")))
+
+obs_for_sr_delta_rule <- expand_grid(
+  iter = 1:5000,
+  adjlist %>%
+    filter(edge == 1) %>%
+    select(from, to)
+) %>%
+  group_by(iter) %>%
+  slice_sample(prop = 1) %>%
+  ungroup()
+
+if (knitting) {
+  here("data", "sr_obs") %>%
+    create_path()
+  
+  obs_for_sr_delta_rule %>%
+    write_csv(file = here("data", "sr_obs", "sim_obs_for_sr.csv"))
+}
+```
+
+Let's simulate SRs using a different number of observations each time. Note that we're using "bidirectional" updating, meaning that observing the pair A+B triggers a learning update for both A and B.
+
+```{r delta-rule-sr-rep}
+sr_delta_100 <- map_dfr(
+  .x = round(seq(0.1, 0.9, 0.1), 2),
+  .f = ~build_successor_td_0(
+    successor_matrix = diag(nrow = 13, ncol = 13),
+    observation_matrix = obs_for_sr_delta_rule %>%
+      filter(iter <= 100) %>%
+      select(from, to) %>%
+      as.matrix(),
+    sr_alpha = 0.1,
+    sr_gamma = .x,
+    bidirectional = TRUE
+  )
+)
+
+sr_delta_5000 <- map_dfr(
+  .x = round(seq(0.1, 0.9, 0.1), 2),
+  .f = ~build_successor_td_0(
+    successor_matrix = diag(nrow = 13, ncol = 13),
+    observation_matrix = obs_for_sr_delta_rule %>%
+      filter(iter <= 5000) %>%
+      select(from, to) %>%
+      as.matrix(),
+    sr_alpha = 0.1,
+    sr_gamma = .x,
+    bidirectional = TRUE
+  )
+)
+```
+
+It seems from the predicted representations that there isn't much of a difference between using 100 observations vs 5000 observations.
+
+```{r plot-delta-rule-sr-rep}
+#| fig.width=8, fig.height=6
+
+plot_sr_delta_100 <- sr_delta_100 %>%
+  mutate(
+    across(c(from, to), factor),
+    from = fct_rev(from),
+    sr_gamma = str_c(unicode_greek["gamma"], "=", sr_gamma)
+  ) %>%
+  ggplot(aes(x=to, y=from, fill=sr_value)) +
+  theme_heatmap() +
+  facet_wrap(~sr_gamma) +
+  geom_tile() +
+  scale_fill_viridis_c(name = "SR counts", limits = c(0, 2.5)) +
+  coord_fixed() +
+  ggtitle("100 observations") +
+  theme(
+    legend.position = "bottom",
+    axis.text.x = element_blank(),
+    axis.text.y = element_blank(),
+    axis.ticks = element_blank()
+  )
+
+plot_sr_delta_5000 <- sr_delta_5000 %>%
+  mutate(
+    across(c(from, to), factor),
+    from = fct_rev(from),
+    sr_gamma = str_c(unicode_greek["gamma"], "=", sr_gamma)
+  ) %>%
+  ggplot(aes(x=to, y=from, fill=sr_value)) +
+  theme_heatmap() +
+  facet_wrap(~sr_gamma) +
+  geom_tile() +
+  scale_fill_viridis_c(name = "SR counts", limits = c(0, 2.5)) +
+  coord_fixed() +
+  ggtitle("5000 observations") +
+  theme(
+    legend.position = "bottom",
+    axis.text.x = element_blank(),
+    axis.text.y = element_blank(),
+    axis.ticks = element_blank()
+  )
+
+plot_sr_delta_rep <- wrap_plots(
+  plot_sr_delta_100, plot_sr_delta_5000,
+  nrow = 1, guides = "collect"
+) &
+  plot_annotation(
+    title = "Delta-rule SR",
+    theme = theme(
+      plot.title = element_text(hjust = 0.5),
+      legend.position = "bottom"
+    )
+  )
+
+plot_sr_delta_rep
+
+if (knitting) {
+  ggsave(
+    filename = here("outputs", workflow_name, "sr_delta_rule_rep.pdf"),
+    plot = plot_sr_delta_rep,
+    width = 8, height = 6,
+    units = "in", dpi = 300,
+    device = cairo_pdf
+  )
+}
+```
+
+We can also check whether the 100- vs 5000-observation SRs make essentially the same predictions about behavior.
+
+```{r delta-rule-sr-predicted}
+predicted_sr_delta_100 <- expand_grid(
+  sr_gamma = round(seq(0.1, 0.9, 0.1), 2),
+  nav_trials
+) %>%
+  left_join(
+    sr_delta_100 %>%
+      select(sr_gamma, endpoint_id = to, opt1_id = from, opt1_sr = sr_value),
+    by = join_by(sr_gamma, endpoint_id, opt1_id)
+  ) %>%
+  left_join(
+    sr_delta_100 %>%
+      select(sr_gamma, endpoint_id = to, opt2_id = from, opt2_sr = sr_value),
+    by = join_by(sr_gamma, endpoint_id, opt2_id)
+  ) %>%
+  rowwise() %>%
+  mutate(
+    p_correct = softmax(
+      option_values = c(opt1_sr, opt2_sr),
+      option_chosen = if_else(opt1_id == correct_choice, 1, 2),
+      temperature = 10,
+      use_inverse_temperature = TRUE
+    )
+  ) %>%
+  ungroup()
+
+predicted_sr_delta_5000 <- expand_grid(
+  sr_gamma = round(seq(0.1, 0.9, 0.1), 2),
+  nav_trials
+) %>%
+  left_join(
+    sr_delta_5000 %>%
+      select(sr_gamma, endpoint_id = to, opt1_id = from, opt1_sr = sr_value),
+    by = join_by(sr_gamma, endpoint_id, opt1_id)
+  ) %>%
+  left_join(
+    sr_delta_5000 %>%
+      select(sr_gamma, endpoint_id = to, opt2_id = from, opt2_sr = sr_value),
+    by = join_by(sr_gamma, endpoint_id, opt2_id)
+  ) %>%
+  rowwise() %>%
+  mutate(
+    p_correct = softmax(
+      option_values = c(opt1_sr, opt2_sr),
+      option_chosen = if_else(opt1_id == correct_choice, 1, 2),
+      temperature = 10,
+      use_inverse_temperature = TRUE
+    )
+  ) %>%
+  ungroup()
+```
+
+We see that there are high correlations between the predictions made by the 100- vs 5000-observation SRs:
+
+```{r corr-delta-rule-sr-predicted}
+left_join(
+  predicted_sr_delta_100 %>%
+    select(
+      sr_gamma, shortest_path,
+      startpoint_id, endpoint_id,
+      opt1_id, opt2_id,
+      sr_100 = p_correct
+    ),
+  predicted_sr_delta_5000 %>%
+    select(
+      sr_gamma, shortest_path,
+      startpoint_id, endpoint_id,
+      opt1_id, opt2_id,
+      sr_5000 = p_correct
+    ),
+  by = join_by(
+    sr_gamma, shortest_path, startpoint_id, endpoint_id, opt1_id, opt2_id
+  )
+) %>%
+  group_by(sr_gamma) %>%
+  nest() %>%
+  mutate(
+    corr = map_dbl(.x = data, .f = ~with(.x, cor(sr_100, sr_5000)))
+  ) %>%
+  ungroup() %>%
+  select(-data) %>%
+  kable_custom(
+    captions = c(
+      "Correlations between predicted behavior from delta-rule SRs",
+      "(100 vs 5000 observations)"
+    )
+  )
+```
+
+When we plot out the model predictions, we see that the two delta-rule SRs are making essentially the same predictions.
+
+```{r plot-delta-rule-sr-nav}
+#| fig.width=6, fig.height=8
+
+plot_sr_delta_nav <- left_join(
+  predicted_sr_delta_100 %>%
+    select(
+      sr_gamma, shortest_path,
+      startpoint_id, endpoint_id,
+      opt1_id, opt2_id,
+      p_correct_100 = p_correct
+    ),
+  predicted_sr_delta_5000 %>%
+    select(
+      sr_gamma, shortest_path,
+      startpoint_id, endpoint_id,
+      opt1_id, opt2_id,
+      p_correct_5000 = p_correct
+    ),
+  by = join_by(
+    sr_gamma, shortest_path, startpoint_id, endpoint_id, opt1_id, opt2_id
+  )
+) %>%
+  pivot_longer(
+    cols = starts_with("p_correct_"),
+    names_to = "n_obs",
+    values_to = "p_correct"
+  ) %>%
+  mutate(
+    n_obs = str_remove(n_obs, "p_correct_"),
+    shortest_path = str_c("Shortest path distance ", shortest_path),
+    sr_gamma = str_c(unicode_greek["gamma"], "=", sr_gamma)
+  ) %>%
+  ggplot(aes(x=n_obs, y=p_correct)) +
+  theme_custom() +
+  facet_grid(
+    rows = vars(sr_gamma),
+    cols = vars(shortest_path)
+  ) +
+  geom_line(
+    aes(group = interaction(startpoint_id, endpoint_id, opt1_id, opt2_id)),
+    alpha = 0.1
+  ) +
+  scale_x_discrete(name = "# Observations") +
+  scale_y_continuous(
+    name = "Accuracy",
+    labels = scales::percent,
+    breaks = seq(0.5, 1, 0.25)
+  ) +
+  ggtitle("Predicted navigation accuracy: Delta-rule SR")
+
+plot_sr_delta_nav
+
+if (knitting) {
+  ggsave(
+    filename = here("outputs", workflow_name, "sr_delta_rule_100_vs_5000.pdf"),
+    plot = plot_sr_delta_nav,
+    width = 6, height = 8,
+    units = "in", dpi = 300,
+    device = cairo_pdf
+  )
+}
+```
+
+## Analytic vs delta-rule SRs
+
+Finally, let's compare the predictions made by the analytic and delta-rule SRs.
+
+We can see that the predicted behavior from the delta-rule SR (learned from 100 observations) correlates very strongly with predicted behavior from the asymptotic SR.
+
+```{r corr-analytic-delta-sr}
+left_join(
+  predicted_sr_delta_100 %>%
+    select(sr_gamma:opt2_id, sr_100 = p_correct),
+  predicted_sr_analytic_counts %>%
+    select(sr_gamma:opt2_id, sr_analytic = p_correct),
+  by = join_by(
+    sr_gamma, shortest_path, startpoint_id, endpoint_id, opt1_id, opt2_id
+  )
+) %>%
+  group_by(sr_gamma) %>%
+  nest() %>%
+  mutate(
+    corr = map_dbl(.x = data, .f = ~with(.x, cor(sr_100, sr_analytic)))
+  ) %>%
+  ungroup() %>%
+  select(-data) %>%
+  kable_custom(
+    captions = c(
+      "Correlations between predicted behavior",
+      "(delta-rule vs analytic SRs)"
+    )
+  )
+```
+
+However, when we plot out the model predictions, we can see that there are very strong divergences in what behaviors the analytic vs delta-rule methods predict.
+
+```{r plot-analytic-delta-sr-1}
+#| fig.width=6, fig.height=8
+
+plot_sr_comparison_1 <- left_join(
+  predicted_sr_analytic_counts %>%
+    select(
+      sr_gamma, shortest_path,
+      startpoint_id, endpoint_id,
+      opt1_id, opt2_id,
+      p_correct_analytic = p_correct
+    ),
+  predicted_sr_delta_100 %>%
+    select(
+      sr_gamma, shortest_path,
+      startpoint_id, endpoint_id,
+      opt1_id, opt2_id,
+      p_correct_delta = p_correct
+    ),
+  by = join_by(
+    sr_gamma, shortest_path, startpoint_id, endpoint_id, opt1_id, opt2_id
+  )
+) %>%
+  pivot_longer(
+    cols = starts_with("p_correct_"),
+    names_to = "method",
+    values_to = "p_correct"
+  ) %>%
+  mutate(
+    method = str_remove(method, "p_correct_"),
+    shortest_path = str_c("Shortest path distance ", shortest_path),
+    sr_gamma = str_c(unicode_greek["gamma"], "=", sr_gamma)
+  ) %>%
+  ggplot(aes(x=method, y=p_correct)) +
+  theme_custom() +
+  facet_grid(
+    rows = vars(sr_gamma),
+    cols = vars(shortest_path)
+  ) +
+  geom_line(
+    aes(group = interaction(startpoint_id, endpoint_id, opt1_id, opt2_id)),
+    alpha = 0.1
+  ) +
+  scale_x_discrete(
+    name = "Method",
+    labels = c("analytic"="Analytic", "delta"="Delta-rule")
+  ) +
+  scale_y_continuous(
+    name = "Accuracy",
+    labels = scales::percent,
+    breaks = seq(0.5, 1, 0.25)
+  ) +
+  ggtitle("Predicted navigation accuracy")
+
+plot_sr_comparison_1
+
+if (knitting) {
+  ggsave(
+    filename = here(
+      "outputs", workflow_name, "sr_analytic_vs_delta_rule_1.pdf"
+    ),
+    plot = plot_sr_comparison_1,
+    width = 6, height = 8,
+    units = "in", dpi = 300,
+    device = cairo_pdf
+  )
+}
+```
+
+We can emphasize this by plotting it in a different way. This highlights that (at least at this softmax temperature) the analytic and delta-rule implementations basically converge at larger values of gamma, but radically diverge at lower values of gamma.
+
+```{r plot-analytic-delta-sr-2}
+#| fig.width=4, fig.height=5
+
+plot_sr_comparison_2 <- left_join(
+  predicted_sr_analytic_counts %>%
+    select(
+      sr_gamma, shortest_path,
+      startpoint_id, endpoint_id,
+      opt1_id, opt2_id,
+      p_correct_analytic = p_correct
+    ),
+  predicted_sr_delta_100 %>%
+    select(
+      sr_gamma, shortest_path,
+      startpoint_id, endpoint_id,
+      opt1_id, opt2_id,
+      p_correct_delta = p_correct
+    ),
+  by = join_by(
+    sr_gamma, shortest_path, startpoint_id, endpoint_id, opt1_id, opt2_id
+  )
+) %>%
+  pivot_longer(
+    cols = starts_with("p_correct_"),
+    names_to = "method",
+    values_to = "p_correct"
+  ) %>%
+  mutate(
+    method = str_remove(method, "p_correct_"),
+    method = if_else(method == "analytic", "Analytic", "Delta-rule"),
+    sr_gamma = str_c(unicode_greek["gamma"], "=", sr_gamma)
+  ) %>%
+  ggplot(aes(x=shortest_path, y=p_correct, color=method)) +
+  theme_custom() +
+  facet_wrap(~sr_gamma) +
+  geom_hline(yintercept = 0.5, linetype = "dashed") +
+  stat_summary(
+    aes(group = method), geom = "line", fun = mean, linewidth = 1
+  ) +
+  geom_point(alpha = 0.25, show.legend = FALSE) +
+  scale_color_manual(
+    name = "SR implementation",
+    values = c("Analytic"="#ca0020", "Delta-rule"="#0571b0")
+  ) +
+  scale_x_discrete(name = "Shortest path distance") +
+  scale_y_continuous(
+    name = "Accuracy",
+    labels = scales::percent,
+    breaks = seq(0.5, 1, 0.25)
+  ) +
+  ggtitle("Predicted navigation accuracy") +
+  theme(legend.position = "bottom")
+
+plot_sr_comparison_2
+
+if (knitting) {
+  ggsave(
+    filename = here(
+      "outputs", workflow_name, "sr_analytic_vs_delta_rule_2.pdf"
+    ),
+    plot = plot_sr_comparison_2,
+    width = 5, height = 5,
+    units = "in", dpi = 300,
+    device = cairo_pdf
+  )
+}
+```
+
+## Model predictions
+
+Taking stock of what we've demonstrated so far:
+
+1. It doesn't matter whether SRs are implemented as encoding counts or probabilities. They contain the same information, and they make identical behavioral predictions when adjusting the softmax temperature parameter appropriately.
+
+2. The delta-rule version of the SR is sensitive to what observations it learns from. That said, we can achieve something that looks like an "asymptotic" SR with as few as 100 observations.
+
+3. The analytic and delta-rule SRs make highly correlated predictions. However, in terms of absolute choice accuracy, they make very different predictions at some values of gamma.
+
+We haven't yet established how the softmax (inverse) temperature parameter affects predicted choice, especially in combination with the gamma parameter, so we need to build an intuition for this. To do so, we'll cheat a little bit: if you're following these scripts in linear order, we don't yet know that, empirically, the goodness-of-fit is essentially identical between the analytic and delta-rule variants of the SR. However, I'm writing this notebook after having done those analyses, so I'm just telling you that this is true. So, for the purpose of doing parameter recovery simulations, we'll just use the analytic method to generate model predictions / later fit parameters on simulated data.
+
+```{r sr-predicted}
+predicted_sr_representation <- map_dfr(
+  .x = c(seq(0.1, 0.9, 0.1), 0.99),
+  .f = ~build_successor_analytically(
+    transmat, successor_horizon = .x, normalize = TRUE
+  )
+)
+
+predicted_sr_navigation <- expand_grid(
+  sr_gamma = c(seq(0.1, 0.9, 0.1), 0.99),
+  softmax_temperature = seq(100, 900, 100),
+  nav_trials
+) %>%
+  left_join(
+    predicted_sr_representation %>%
+      rename(endpoint_id = to, opt1_id = from, opt1_sr = sr_value),
+    by = join_by(sr_gamma, endpoint_id, opt1_id)
+  ) %>%
+  left_join(
+    predicted_sr_representation %>%
+      rename(endpoint_id = to, opt2_id = from, opt2_sr = sr_value),
+    by = join_by(sr_gamma, endpoint_id, opt2_id)
+  ) %>%
+  rowwise() %>%
+  mutate(
+    p_correct = softmax(
+      option_values = c(opt1_sr, opt2_sr),
+      option_chosen = if_else(opt1_id == correct_choice, 1, 2),
+      temperature = softmax_temperature,
+      use_inverse_temperature = TRUE
+    )
+  ) %>%
+  ungroup()
+```
+
+The plots below make clear two things: 1) as a general rule, higher-gamma SRs saturate at smaller values of the inverse temperature parameter, and may in fact be hard to identify if the softmax temperature is sufficiently high, and 2) for lower-gamma SRs, saturation evidently requires fairly large values of the inverse temperature parameter. This makes it a little hard to choose good values of the temperature parameter to simulate over.
+
+```{r plot-sr}
+#| fig.width=10, fig.height=10
+
+plot_sr_trials <- predicted_sr_navigation %>%
+  mutate(
+    softmax_temperature = str_c(
+      "Inv. temp.=",
+      str_pad(softmax_temperature, width = 3, side = "left", pad = "0")
+    ),
+    sr_gamma = str_c(unicode_greek["gamma"], "=", sr_gamma)
+  ) %>%
+  ggplot(aes(x=shortest_path, y=p_correct)) +
+  theme_custom() +
+  facet_grid(
+    rows = vars(sr_gamma),
+    cols = vars(softmax_temperature)
+  ) +
+  geom_hline(yintercept = 0.5, linetype = "dashed") +
+  geom_point(alpha = 0.1) +
+  stat_summary(aes(group = 1), geom = "line", fun = mean, linewidth = 1) +
+  scale_x_discrete(name = "Shortest path distance") +
+  scale_y_continuous(
+    name = "Accuracy", labels = scales::percent, limits = c(0.5, 1)
+  ) +
+  ggtitle("Simulated Successor Rep.")
+
+plot_sr_summary <- predicted_sr_navigation %>%
+  group_by(sr_gamma, softmax_temperature, shortest_path) %>%
+  summarise(p_correct = mean(p_correct), .groups = "drop") %>%
+  mutate(sr_gamma = str_c(unicode_greek["gamma"], "=", sr_gamma)) %>%
+  ggplot(aes(x=shortest_path, y=p_correct, color=softmax_temperature)) +
+  facet_wrap(~sr_gamma, ncol = 5) +
+  theme_custom() +
+  geom_hline(yintercept = 0.5, linetype = "dashed") +
+  geom_line(aes(group = softmax_temperature)) +
+  scale_color_viridis_c(
+    name = "Inv. temp.", option = "turbo", end = 0.9, direction = -1
+  ) +
+  scale_x_discrete(name = "Shortest path distance") +
+  scale_y_continuous(
+    name = "Accuracy", labels = scales::percent, limits = c(0.5, 1)
+  ) +
+  theme(legend.position = "bottom") +
+  ggtitle("Simulated Successor Rep.")
+
+plot_sr_trials
+plot_sr_summary
+
+if (knitting) {
+  ggsave(
+    filename = here("outputs", workflow_name, "sr_trials.pdf"),
+    plot = plot_sr_trials,
+    width = 10, height = 10,
+    units = "in", dpi = 300,
+    device = cairo_pdf
+  )
+  
+  ggsave(
+    filename = here("outputs", workflow_name, "sr_summary.pdf"),
+    plot = plot_sr_summary,
+    width = 5, height = 5,
+    units = "in", dpi = 300,
+    device = cairo_pdf
+  )
+}
+```
+
+## Simulate behavior
+
+In this case, a good strategy might be to assume that the softmax temperatures come from a half-Gaussian distribution with a fairly liberal SD. Note that, as was the case with BFS-forward, a previous version of this work had estimated a lapse rate. To demonstrate that the lapse rate has poor recoverability, we'll simulate two sets of behaviors, one affected by a lapse rate, one not.
+
+```{r sim-sr}
+set.seed(sum(utf8ToInt("Thank you, next")))
+
+sim_params_sr <- tibble(
+  sub_id = 1:500,
+  sr_gamma = runif(n = 500, min = 0, max = 0.99),
+  softmax_temperature = rnorm(n = 500, mean = 0, sd = 400),
+  lapse_rate = runif(n = 500, min = 0, max = 1)
+) %>%
+  mutate(softmax_temperature = abs(softmax_temperature))
+
+sim_rep_sr <- sim_params_sr %>%
+  rowwise() %>%
+  mutate(
+    predicted_sr = map(
+      .x = sr_gamma,
+      .f = ~build_successor_analytically(
+        transmat, successor_horizon = .x, normalize = TRUE
+      )
+    )
+  ) %>%
+  ungroup() %>%
+  select(sub_id, predicted_sr) %>%
+  unnest(predicted_sr)
+
+sim_behav_sr <- expand_grid(
+  sub_id = 1:500,
+  nav_trials
+) %>%
+  # Add subject-specific parameters
+  left_join(sim_params_sr, by = join_by(sub_id)) %>%
+  select(-lapse_rate) %>%
+  # Add subject-specific predicted SR
+  left_join(
+    sim_rep_sr %>%
+      select(sub_id, endpoint_id = to, opt1_id = from, opt1_sr = sr_value),
+    by = join_by(sub_id, endpoint_id, opt1_id)
+  ) %>%
+  left_join(
+    sim_rep_sr %>%
+      select(sub_id, endpoint_id = to, opt2_id = from, opt2_sr = sr_value),
+    by = join_by(sub_id, endpoint_id, opt2_id)
+  ) %>%
+  # Calculate probability of choosing opt1 given parameters + predicted SR
+  # Then make binary choice in proportion to that probability
+  rowwise() %>%
+  mutate(
+    p_choose_opt1 = softmax(
+      option_values = c(opt1_sr, opt2_sr),
+      option_chosen = 1,
+      temperature = softmax_temperature,
+      use_inverse_temperature = TRUE
+    ),
+    simulated_choice = sample(
+      c(opt1_id, opt2_id), size = 1, prob = c(p_choose_opt1, 1-p_choose_opt1)
+    )
+  ) %>%
+  ungroup()
+
+sim_behav_sr_with_lapse <- expand_grid(
+  sub_id = 1:500,
+  nav_trials
+) %>%
+  # Add subject-specific parameters
+  left_join(sim_params_sr, by = join_by(sub_id)) %>%
+  # Add subject-specific predicted SR
+  left_join(
+    sim_rep_sr %>%
+      select(sub_id, endpoint_id = to, opt1_id = from, opt1_sr = sr_value),
+    by = join_by(sub_id, endpoint_id, opt1_id)
+  ) %>%
+  left_join(
+    sim_rep_sr %>%
+      select(sub_id, endpoint_id = to, opt2_id = from, opt2_sr = sr_value),
+    by = join_by(sub_id, endpoint_id, opt2_id)
+  ) %>%
+  # Calculate probability of choosing opt1 given parameters + predicted SR
+  # Then make binary choice in proportion to that probability
+  rowwise() %>%
+  mutate(
+    p_choose_opt1 = softmax(
+      option_values = c(opt1_sr, opt2_sr),
+      option_chosen = 1,
+      temperature = softmax_temperature,
+      use_inverse_temperature = TRUE,
+      lapse_rate = lapse_rate
+    ),
+    simulated_choice = sample(
+      c(opt1_id, opt2_id), size = 1, prob = c(p_choose_opt1, 1-p_choose_opt1)
+    )
+  ) %>%
+  ungroup()
+
+plot_param_dist_sr <- sim_params_sr %>%
+  ggplot(aes(x=sr_gamma, y=softmax_temperature)) +
+  theme_custom() +
+  geom_point(alpha = 0.25) +
+  xlab("Gamma") +
+  ylab("Inverse temperature") +
+  ggtitle("SR: Simulated parameter distribution")
+
+plot_param_dist_sr_softmax <- sim_params_sr %>%
+  ggplot(aes(x=softmax_temperature)) +
+  theme_custom() +
+  geom_histogram() +
+  xlab("Inverse temperature") +
+  ggtitle("SR: Simulated parameter distribution")
+
+plot_param_dist_sr
+plot_param_dist_sr_softmax
+
+if (knitting) {
+  ggsave(
+    filename = here("outputs", workflow_name, "sr_param_dist.pdf"),
+    plot = plot_param_dist_sr,
+    width = 5, height = 5,
+    units = "in", dpi = 300
+  )
+  
+  ggsave(
+    filename = here("outputs", workflow_name, "sr_param_dist_softmax.pdf"),
+    plot = plot_param_dist_sr_softmax,
+    width = 5, height = 5,
+    units = "in", dpi = 300
+  )
+  
+  sim_behav_sr %>%
+    write_csv(
+      here(
+        "data", "simulated_model_behaviors",
+        "sim_nav_sr_no_lapse.csv"
+      )
+    )
+  
+  sim_behav_sr_with_lapse %>%
+    write_csv(
+      here(
+        "data", "simulated_model_behaviors",
+        "sim_nav_sr_with_lapse.csv"
+      )
+    )
+}
+```
+
+
+# Figure for supplement
+
+The very last thing we want to do is to create a figure of the simulated *a priori* predictions for all planning models, to put into the supplement.
+
+```{r plot-planning-for-supp}
+plot_nav_predictions_for_supp <- wrap_plots(
+  plot_bfs_backward_summary +
+    ggtitle("BFS-backward") +
+    scale_color_viridis_c(
+      name = "Search threshold", option = "turbo", end = 0.9
+    ),
+  plot_bfs_forward_summary +
+    ggtitle("BFS-forward") +
+    scale_color_viridis_c(
+      name = "Search threshold", option = "turbo", end = 0.9
+    ),
+  plot_ideal_obs_summary +
+    ggtitle("Ideal observer") +
+    scale_color_viridis_c(
+      name = "Inverse temperature",
+      option = "inferno", direction = -1, begin = 0.4
+    ),
+  nrow = 1, guides = "collect"
+) +
+  plot_annotation(
+    title = "Simulated behavior: Model-based planning",
+    theme = theme(plot.title = element_text(hjust = 0.5)),
+    tag_levels = "A", tag_suffix = "."
+  ) &
+  theme(legend.position = "bottom")
+
+plot_nav_predictions_for_supp
+
+if (knitting) {
+  ggsave(
+    filename = here("figures", "supp_sim_model_based_planning.pdf"),
+    plot = plot_nav_predictions_for_supp,
+    width = 8, height = 4,
+    units = "in", dpi = 300
+  )
+}
+```
+

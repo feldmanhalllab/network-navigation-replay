@@ -1,0 +1,682 @@
+---
+title: "Simulating behaviors for model confusion analysis"
+output:
+  html_document:
+    code_download: true
+    code_folding: hide
+    toc: true
+    toc_float:
+      collapsed: true
+---
+
+# Goal
+
+In a previous set of analyses, we established that our parameter estimation procedure allows us to recover known/simulated parameter values with acceptable accuracy. We then fit parameters for each model, for each real human subject.
+
+Later on, we want to make inferences about what model(s) best fit human subjects' behaviors. However, since we don't know what "true" model humans are using, it would be nice to know how likely it is that we'd (mistakenly) infer that model X is the best-fitting model, given that model Y is actually the data-generating mechanism.
+
+To do this, we'll perform a "model confusion" analysis. The idea is that we'll use our empirical distributions of parameter fits to simulate behavior, then to fit every model on every simulated dataset. If the models are highly confusable, this hinders our ability to make strong inferences during the model selection process.
+
+
+# Setup
+
+```{r libraries}
+workflow_name <- "netnav_05_model_confusion"
+
+library(tidyverse)
+library(here)
+library(patchwork)
+
+source(here("code", "utils", "modeling_utils.R"))
+source(here("code", "utils", "representation_utils.R"))
+
+source(here("code", "utils", "ggplot_themes.R"))
+source(here("code", "utils", "kable_utils.R"))
+source(here("code", "utils", "unicode_greek.R"))
+
+knitting <- knitr::is_html_output()
+
+create_path <- function(this_path) {
+  if (!dir.exists(this_path)) {
+    dir.create(this_path, recursive = TRUE)
+  }
+}
+
+if (knitting) {
+  here("outputs", workflow_name) %>%
+    create_path()
+}
+```
+
+```{r load-data}
+bfs_backward_sims <- here(
+  "data", "bfs_sims", "bfs_sims_learned_backward.csv"
+) %>%
+  read_csv(show_col_types = FALSE) %>%
+  filter(
+    shortest_path_given_opts == shortest_path_given_start_end,
+    two_correct_options == FALSE
+  ) %>%
+  mutate(shortest_path = factor(shortest_path_given_opts)) %>%
+  select(-starts_with("shortest_path_given"), -two_correct_options) %>%
+  group_by(
+    shortest_path, startpoint_id, endpoint_id, opt1_id, opt2_id, correct_choice
+  ) %>%
+  summarise(
+    p_bfs_correct = mean(bfs_choice == correct_choice),
+    p_bfs_chooses_opt1 = mean(bfs_choice == opt1_id),
+    bfs_visits = mean(bfs_n_visits_total),
+    .groups = "drop"
+  )
+
+bfs_forward_sims <- here("data", "bfs_sims", "bfs_sims_learned_forward.csv") %>%
+  read_csv(show_col_types = FALSE) %>%
+  filter(
+    shortest_path_given_opts == shortest_path_given_start_end,
+    two_correct_options == FALSE
+  ) %>%
+  mutate(shortest_path = factor(shortest_path_given_opts)) %>%
+  select(-starts_with("shortest_path_given"), -two_correct_options) %>%
+  group_by(
+    shortest_path, startpoint_id, endpoint_id, opt1_id, opt2_id, correct_choice
+  ) %>%
+  summarise(
+    p_bfs_correct = mean(bfs_choice == correct_choice),
+    p_bfs_chooses_opt1 = mean(bfs_choice == opt1_id),
+    bfs_visits = mean(bfs_n_visits_total),
+    .groups = "drop"
+  )
+
+nav_trials <- here("data", "clean_data", "study1_message_passing.csv") %>%
+  read_csv(show_col_types = FALSE) %>%
+  filter(
+    two_correct_options == FALSE,
+    shortest_path_given_opts == shortest_path_given_start_end
+  ) %>%
+  mutate(shortest_path = factor(shortest_path_given_opts)) %>%
+  filter(sub_id == 1) %>%
+  select(
+    shortest_path,
+    startpoint_id, endpoint_id,
+    opt1_id, opt2_id,
+    correct_choice,
+    opt1_distance = dist_opt1,
+    opt2_distance = dist_opt2
+  ) %>%
+  arrange(shortest_path, startpoint_id, endpoint_id, opt1_id, opt2_id) %>%
+  # Replace undefined distances (corresponding to impossible options)
+  # so that the softmax gets non-NA inputs; we assume that impossible
+  # options are just as bad as the longest distance found in this set
+  # of trials, i.e., a distance of 8
+  mutate(across(c(opt1_distance, opt2_distance), ~replace_na(.x, 8)))
+
+adjlist <- here("data", "clean_data", "adjlist_learned.csv") %>%
+  read_csv(show_col_types = FALSE)
+
+transmat <- adjlist %>%
+  group_by(from) %>%
+  mutate(edge = edge / sum(edge)) %>%
+  ungroup() %>%
+  pivot_wider(names_from = to, values_from = edge) %>%
+  column_to_rownames("from") %>%
+  as.matrix()
+```
+
+```{r load-params}
+params <- here("data", "param_fits") %>%
+  fs::dir_ls(
+    recurse = 1,
+    regexp = str_c(
+      "_",
+      "(bfs_(backward|forward)|",
+      "ideal_obs|",
+      "sr_analytic)_",
+      "(.)+\\.csv"
+    )
+  ) %>%
+  map_dfr(
+    .f = ~read_csv(.x, show_col_types = FALSE),
+    .id = "filename"
+  ) %>%
+  mutate(
+    # Recover model ID
+    model = str_extract(
+      filename,
+      str_c(
+        "_",
+        "(bfs_(backward|forward)|",
+        "ideal_obs|",
+        "sr_analytic)_"
+      )
+    ),
+    model = str_sub(model, 2, -2),
+    # Recover study ID
+    study = str_extract(filename, "study[[:digit:]]"),
+    study = str_replace(study, "study", "Study "),
+    # Recover subject ID
+    sub_id = str_extract(filename, "sub_[[:digit:]]+"),
+    sub_id = str_remove(sub_id, "sub_"),
+    sub_id = as.integer(sub_id),
+    # Recover measurement ID
+    measurement_id = str_extract(filename, "_D[[:digit:]]b?"),
+    measurement_id = str_remove(measurement_id, "_"),
+    # Get parameter values
+    param_value = if_else(
+      is.na(param_value_human_readable),
+      param_value,
+      param_value_human_readable
+    )
+  ) %>%
+  # Find best-fitting optimization run
+  filter(convergence == "converged") %>%
+  group_by(model, study, sub_id, measurement_id) %>%
+  slice_min(optim_value, n = 1) %>%
+  ungroup() %>%
+  # Some subjects may have had multiple "best" optimization runs
+  # In that case, just go with whichever "best" run was estimated first
+  group_by(model, study, sub_id, measurement_id) %>%
+  slice_min(optimizer_run, n = 1) %>%
+  ungroup() %>%
+  # Clean up
+  select(
+    model, study, sub_id, measurement_id,
+    param_name, param_value,
+    neg_loglik = optim_value
+  ) %>%
+  arrange(model, study, sub_id, measurement_id, param_name)
+```
+
+
+# BFS-backward
+
+First, let's just take a look at what the parameter distribution looks like.
+
+```{r plot-fits-bfs-backward}
+plot_params_bfs_backward_empirical <- params %>%
+  filter(model == "bfs_backward") %>%
+  filter(measurement_id %in% c("D1", "D2")) %>%
+  pivot_wider(names_from = param_name, values_from = param_value) %>%
+  ggplot(aes(x=search_threshold)) +
+  theme_custom() +
+  geom_histogram(binwidth = 1) +
+  xlab("Search threshold") +
+  ggtitle("Empirical distribution: BFS-backward")
+
+plot_params_bfs_backward_empirical
+```
+
+To simulate behavior, let's sample from this distribution 500 times (with replacement, as the number of agents we're simulating exceeds the number of real subjects/datapoints we have). To introduce a little bit of stochasticity, we'll also add some Gaussian noise with a mean of 0 and a SD of 0.5.
+
+```{r sim-bfs-backward}
+set.seed(sum(utf8ToInt("We only said goodbye in words")))
+
+sim_params_bfs_backward <- params %>%
+  filter(model == "bfs_backward") %>%
+  filter(measurement_id %in% c("D1", "D2")) %>%
+  pivot_wider(names_from = param_name, values_from = param_value) %>%
+  select(search_threshold) %>%
+  deframe() %>%
+  sample(size = 500, replace = TRUE) %>%
+  enframe(name = "sub_id", value = "search_threshold") %>%
+  mutate(
+    search_threshold = search_threshold + rnorm(n = 500, mean = 0, sd = 0.5),
+    search_threshold = case_when(
+      search_threshold < 0 ~ runif(n = 1),
+      search_threshold > 15 ~ runif(n = 1, min = 14, max = 15),
+      TRUE ~ search_threshold
+    )
+  )
+
+sim_behav_bfs_backward <- expand_grid(
+  sub_id = 1:500,
+  bfs_backward_sims
+) %>%
+  # Add subject-specific parameters
+  left_join(sim_params_bfs_backward, by = join_by(sub_id)) %>%
+  # What's the probability of *completing* BFS-online all the way through?
+  rowwise() %>%
+  mutate(
+    p_complete_bfs = softmax(
+      option_values = c(search_threshold, bfs_visits),
+      option_chosen = 1,
+      temperature = 1
+    )
+  ) %>%
+  ungroup() %>%
+  # Weigh BFS predictions accordingly
+  mutate(
+    p_give_up = 1 - p_complete_bfs,
+    p_choose_opt1 = (
+      (p_complete_bfs * p_bfs_chooses_opt1) + (p_give_up * 1/2)
+    )
+  ) %>%
+  # Make binary choice in proportion to the probability of choosing opt1
+  rowwise() %>%
+  mutate(
+    simulated_choice = sample(
+      c(opt1_id, opt2_id), size = 1, prob = c(p_choose_opt1, 1-p_choose_opt1)
+    )
+  ) %>%
+  ungroup()
+
+plot_params_bfs_backward_simulated <- sim_params_bfs_backward %>%
+  ggplot(aes(x=search_threshold)) +
+  theme_custom() +
+  geom_histogram(binwidth = 1) +
+  xlab("Search threshold") +
+  ggtitle("Simulation distribution")
+
+plot_params_bfs_backward <- wrap_plots(
+  plot_params_bfs_backward_empirical +
+    ggtitle("Empirical distribution"),
+  plot_params_bfs_backward_simulated
+) &
+  plot_annotation(
+    title = "BFS-backward",
+    theme = theme(plot.title = element_text(hjust = 0.5))
+  )
+
+plot_params_bfs_backward
+
+if (knitting) {
+  ggsave(
+    filename = here("outputs", workflow_name, "bfs_backward_param_dist.pdf"),
+    plot = plot_params_bfs_backward,
+    width = 5, height = 2.5,
+    units = "in", dpi = 300
+  )
+  
+  sim_behav_bfs_backward %>%
+    write_csv(
+      here(
+        "data", "simulated_model_behaviors",
+        "sim_nav_bfs_backward_confusion.csv"
+      )
+    )
+}
+```
+
+
+# BFS-forward
+
+We'll re-use the BFS-backward simulation procedure for BFS-forward.
+
+```{r plot-fits-bfs-forward}
+plot_params_bfs_forward_empirical <- params %>%
+  filter(model == "bfs_forward") %>%
+  filter(measurement_id %in% c("D1", "D2")) %>%
+  pivot_wider(names_from = param_name, values_from = param_value) %>%
+  ggplot(aes(x=search_threshold)) +
+  theme_custom() +
+  geom_histogram(binwidth = 1) +
+  xlab("Search threshold") +
+  ggtitle("Empirical distribution: BFS-forward")
+
+plot_params_bfs_forward_empirical
+```
+
+```{r sim-bfs-forward}
+set.seed(sum(utf8ToInt("Defiant to the end, we hear the call")))
+
+sim_params_bfs_forward <- params %>%
+  filter(model == "bfs_forward") %>%
+  filter(measurement_id %in% c("D1", "D2")) %>%
+  pivot_wider(names_from = param_name, values_from = param_value) %>%
+  select(search_threshold) %>%
+  deframe() %>%
+  sample(size = 500, replace = TRUE) %>%
+  enframe(name = "sub_id", value = "search_threshold") %>%
+  mutate(
+    search_threshold = search_threshold + rnorm(n = 500, mean = 0, sd = 0.5),
+    search_threshold = case_when(
+      search_threshold < 0 ~ runif(n = 1),
+      search_threshold > 16 ~ runif(n = 1, min = 14, max = 16),
+      TRUE ~ search_threshold
+    )
+  )
+
+sim_behav_bfs_forward <- expand_grid(
+  sub_id = 1:500,
+  bfs_forward_sims
+) %>%
+  # Add subject-specific parameters
+  left_join(sim_params_bfs_forward, by = join_by(sub_id)) %>%
+  # What's the probability of *completing* BFS-online all the way through?
+  rowwise() %>%
+  mutate(
+    p_complete_bfs = softmax(
+      option_values = c(search_threshold, bfs_visits),
+      option_chosen = 1,
+      temperature = 1
+    )
+  ) %>%
+  ungroup() %>%
+  # Weigh BFS predictions accordingly
+  mutate(
+    p_give_up = 1 - p_complete_bfs,
+    p_choose_opt1 = (
+      (p_complete_bfs * p_bfs_chooses_opt1) + (p_give_up * 1/2)
+    )
+  ) %>%
+  # Make binary choice in proportion to the probability of choosing opt1
+  rowwise() %>%
+  mutate(
+    simulated_choice = sample(
+      c(opt1_id, opt2_id), size = 1, prob = c(p_choose_opt1, 1-p_choose_opt1)
+    )
+  ) %>%
+  ungroup()
+
+plot_params_bfs_forward_simulated <- sim_params_bfs_forward %>%
+  ggplot(aes(x=search_threshold)) +
+  theme_custom() +
+  geom_histogram(binwidth = 1) +
+  xlab("Search threshold") +
+  ggtitle("Simulation distribution")
+
+plot_params_bfs_forward <- wrap_plots(
+  plot_params_bfs_forward_empirical +
+    ggtitle("Empirical distribution"),
+  plot_params_bfs_forward_simulated
+) &
+  plot_annotation(
+    title = "BFS-forward",
+    theme = theme(plot.title = element_text(hjust = 0.5))
+  )
+
+plot_params_bfs_forward
+
+if (knitting) {
+  ggsave(
+    filename = here("outputs", workflow_name, "bfs_forward_param_dist.pdf"),
+    plot = plot_params_bfs_forward,
+    width = 5, height = 2.5,
+    units = "in", dpi = 300
+  )
+  
+  sim_behav_bfs_forward %>%
+    write_csv(
+      here(
+        "data", "simulated_model_behaviors",
+        "sim_nav_bfs_forward_confusion.csv"
+      )
+    )
+}
+```
+
+
+# Ideal observer
+
+As we can see, the distribution of fits is a bit exponential-looking for the ideal observer softmax temperature.
+
+```{r plot-fits-ideal-obs}
+plot_params_ideal_obs_empirical <- params %>%
+  filter(model == "ideal_obs") %>%
+  filter(measurement_id %in% c("D1", "D2")) %>%
+  pivot_wider(names_from = param_name, values_from = param_value) %>%
+  ggplot(aes(x=softmax_temperature)) +
+  theme_custom() +
+  geom_histogram(binwidth = 1) +
+  xlab("Inverse temperature") +
+  ggtitle("Empirical distribution: Ideal observer")
+
+plot_params_ideal_obs_empirical
+```
+
+Accordingly, we'll add Gaussian noise with mean = 0 and SD = 0.1.
+
+```{r sim-ideal-obs}
+set.seed(sum(utf8ToInt("Everyone outside swallow the light and creed")))
+
+sim_params_ideal_obs <- params %>%
+  filter(model == "ideal_obs") %>%
+  filter(measurement_id %in% c("D1", "D2")) %>%
+  pivot_wider(names_from = param_name, values_from = param_value) %>%
+  select(softmax_temperature) %>%
+  deframe() %>%
+  sample(size = 500, replace = TRUE) %>%
+  enframe(name = "sub_id", value = "softmax_temperature") %>%
+  mutate(
+    softmax_temperature = softmax_temperature +
+      rnorm(n = 500, mean = 0, sd = 0.1),
+    softmax_temperature = case_when(
+      softmax_temperature > 0 ~ runif(n = 1, min = -1, max = 0),
+      softmax_temperature < -5 ~ runif(n = 1, min = -5, max = -4),
+      TRUE ~ softmax_temperature
+    )
+  )
+
+sim_behav_ideal_obs <- expand_grid(
+  sub_id = 1:500,
+  nav_trials
+) %>%
+  # Add subject-specific parameters
+  left_join(sim_params_ideal_obs, by = join_by(sub_id)) %>%
+  rowwise() %>%
+  mutate(
+    p_choose_opt1 = softmax(
+      option_values = c(opt1_distance, opt2_distance),
+      option_chosen = 1,
+      temperature = softmax_temperature,
+      use_inverse_temperature = TRUE
+    ),
+    simulated_choice = sample(
+      c(opt1_id, opt2_id), size = 1, prob = c(p_choose_opt1, 1-p_choose_opt1)
+    )
+  ) %>%
+  ungroup()
+
+plot_params_ideal_obs_simulated <- sim_params_ideal_obs %>%
+  ggplot(aes(x=softmax_temperature)) +
+  theme_custom() +
+  geom_histogram(binwidth = 1) +
+  xlab("Inverse temperature") +
+  ggtitle("Simulation distribution")
+
+plot_params_ideal_obs <- wrap_plots(
+  plot_params_ideal_obs_empirical +
+    ggtitle("Empirical distribution"),
+  plot_params_ideal_obs_simulated
+) &
+  plot_annotation(
+    title = "Ideal observer",
+    theme = theme(plot.title = element_text(hjust = 0.5))
+  )
+
+plot_params_ideal_obs
+
+if (knitting) {
+  ggsave(
+    filename = here("outputs", workflow_name, "ideal_obs_param_dist.pdf"),
+    plot = plot_params_ideal_obs,
+    width = 5, height = 2.5,
+    units = "in", dpi = 300
+  )
+  
+  sim_behav_ideal_obs %>%
+    write_csv(
+      here(
+        "data", "simulated_model_behaviors",
+        "sim_nav_ideal_obs_confusion.csv"
+      )
+    )
+}
+```
+
+
+# Successor Representation
+
+For some subjects/datapoints, it looks like the optimizer estimated fairly extreme values of the softmax temperature. In successive plots, we'll zoom in to emphasize more typical/representative values.
+
+It's clear that there's a (nonlinear) association between gamma and temperature, so in our simulations, we'll want to sample paired parameters.
+
+```{r plot-fits-sr}
+params %>%
+  filter(model == "sr_analytic") %>%
+  filter(measurement_id %in% c("D1", "D2")) %>%
+  pivot_wider(names_from = param_name, values_from = param_value) %>%
+  ggplot(aes(x=sr_gamma, y=softmax_temperature)) +
+  theme_custom() +
+  geom_point(alpha = 0.5) +
+  xlab("Gamma") +
+  ylab("Inverse temperature") +
+  ggtitle("Empirical distribution: Successor Representation")
+
+params %>%
+  filter(model == "sr_analytic") %>%
+  filter(measurement_id %in% c("D1", "D2")) %>%
+  pivot_wider(names_from = param_name, values_from = param_value) %>%
+  ggplot(aes(x=sr_gamma, y=softmax_temperature)) +
+  theme_custom() +
+  geom_point(alpha = 0.5) +
+  xlab("Gamma") +
+  ylab("Inverse temperature") +
+  ggtitle("Empirical distribution: Successor Representation") +
+  coord_cartesian(ylim = c(0, 20000))
+
+params %>%
+  filter(model == "sr_analytic") %>%
+  filter(measurement_id %in% c("D1", "D2")) %>%
+  pivot_wider(names_from = param_name, values_from = param_value) %>%
+  ggplot(aes(x=sr_gamma, y=softmax_temperature)) +
+  theme_custom() +
+  geom_point(alpha = 0.5) +
+  xlab("Gamma") +
+  ylab("Inverse temperature") +
+  ggtitle("Empirical distribution: Successor Representation") +
+  coord_cartesian(ylim = c(0, 4000))
+
+plot_params_sr_empirical <- params %>%
+  filter(model == "sr_analytic") %>%
+  filter(measurement_id %in% c("D1", "D2")) %>%
+  pivot_wider(names_from = param_name, values_from = param_value) %>%
+  ggplot(aes(x=sr_gamma, y=softmax_temperature)) +
+  theme_custom() +
+  geom_point(alpha = 0.5) +
+  xlab("Gamma") +
+  ylab("Inverse temperature") +
+  ggtitle("Empirical distribution: Successor Representation") +
+  coord_cartesian(ylim = c(0, 300))
+
+plot_params_sr_empirical
+```
+
+In the simulations, it doesn't matter too much if there are extreme softmax temperatures; functionally, this will just end up looking like a hardmax choice rule in the behavior. 
+
+To the softmax temperatures, we'll add Gaussian noise with SD = 5. To gamma, we'll add Gaussian noise with SD = 0.04.
+
+```{r sim-sr}
+set.seed(sum(utf8ToInt("Await the hunter to decipher the stone")))
+
+sim_params_sr <- params %>%
+  filter(model == "sr_analytic") %>%
+  filter(measurement_id %in% c("D1", "D2")) %>%
+  pivot_wider(names_from = param_name, values_from = param_value) %>%
+  select(softmax_temperature, sr_gamma) %>%
+  deframe() %>%
+  sample(size = 500, replace = TRUE) %>%
+  enframe(name = "softmax_temperature", value = "sr_gamma") %>%
+  mutate(
+    sub_id = row_number(),
+    softmax_temperature = as.numeric(softmax_temperature),
+    softmax_temperature = softmax_temperature +
+      rnorm(n = 500, mean = 0, sd = 5),
+    sr_gamma = sr_gamma + rnorm(n = 500, mean = 0, sd = 0.04),
+    sr_gamma = case_when(
+      sr_gamma < 0 ~ runif(n = 1, min = 0, max = 0.05),
+      sr_gamma > 0.99 ~ runif(n = 1, min = 0.94, max = 0.99),
+      TRUE ~ sr_gamma
+    )
+  )
+
+sim_rep_sr <- sim_params_sr %>%
+  rowwise() %>%
+  mutate(
+    predicted_sr = map(
+      .x = sr_gamma,
+      .f = ~build_successor_analytically(
+        transmat, successor_horizon = .x, normalize = TRUE
+      )
+    )
+  ) %>%
+  ungroup() %>%
+  select(sub_id, predicted_sr) %>%
+  unnest(predicted_sr)
+
+sim_behav_sr <- expand_grid(
+  sub_id = 1:500,
+  nav_trials
+) %>%
+  # Add subject-specific parameters
+  left_join(sim_params_sr, by = join_by(sub_id)) %>%
+  # Add subject-specific predicted SR
+  left_join(
+    sim_rep_sr %>%
+      select(sub_id, endpoint_id = to, opt1_id = from, opt1_sr = sr_value),
+    by = join_by(sub_id, endpoint_id, opt1_id)
+  ) %>%
+  left_join(
+    sim_rep_sr %>%
+      select(sub_id, endpoint_id = to, opt2_id = from, opt2_sr = sr_value),
+    by = join_by(sub_id, endpoint_id, opt2_id)
+  ) %>%
+  # Calculate probability of choosing opt1 given parameters + predicted SR
+  # Then make binary choice in proportion to that probability
+  rowwise() %>%
+  mutate(
+    p_choose_opt1 = softmax(
+      option_values = c(opt1_sr, opt2_sr),
+      option_chosen = 1,
+      temperature = softmax_temperature,
+      use_inverse_temperature = TRUE
+    ),
+    # Extreme softmax temps may cause NaNs
+    p_choose_opt1 = case_when(
+      is.nan(p_choose_opt1) & (opt1_sr > opt2_sr) ~ 1,
+      TRUE ~ p_choose_opt1
+    ),
+    simulated_choice = sample(
+      c(opt1_id, opt2_id), size = 1, prob = c(p_choose_opt1, 1-p_choose_opt1)
+    )
+  ) %>%
+  ungroup()
+
+plot_params_sr_simulated <- sim_params_sr %>%
+  ggplot(aes(x=sr_gamma, y=softmax_temperature)) +
+  theme_custom() +
+  geom_point(alpha = 0.4) +
+  xlab("Gamma") +
+  ylab("Inverse temperature") +
+  ggtitle("Simulation distribution") +
+  coord_cartesian(ylim = c(0, 300))
+
+plot_params_sr <- wrap_plots(
+  plot_params_sr_empirical +
+    ggtitle("Empirical distribution"),
+  plot_params_sr_simulated
+) &
+  plot_annotation(
+    title = "Successor Representation",
+    theme = theme(plot.title = element_text(hjust = 0.5))
+  )
+
+plot_params_sr
+
+if (knitting) {
+  ggsave(
+    filename = here("outputs", workflow_name, "sr_param_dist.pdf"),
+    plot = plot_params_sr,
+    width = 5, height = 2.5,
+    units = "in", dpi = 300
+  )
+  
+  sim_behav_sr %>%
+    write_csv(
+      here(
+        "data", "simulated_model_behaviors",
+        "sim_nav_sr_confusion.csv"
+      )
+    )
+}
+```
+
